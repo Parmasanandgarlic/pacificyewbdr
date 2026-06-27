@@ -4,16 +4,11 @@ import requests
 from supabase import create_client, Client
 import google.generativeai as genai
 
-# 1. Initialize Clients
-url: str = os.environ.get("SUPABASE_URL")
-key: str = os.environ.get("SUPABASE_KEY")
-supabase: Client = create_client(url, key)
+# --- Lazy-initialized globals ---
+_supabase: Client = None
+_model = None
 
-genai.configure(api_key=os.environ.get("GOOGLE_API_KEY"))
-
-# Using Gemini 3.1 Flash Lite (Update model string if Google's exact ID differs in your console)
 MODEL_NAME = "gemini-3.1-flash-lite"
-model = genai.GenerativeModel(MODEL_NAME)
 
 # Disable Google's safety filters that sometimes block BDR outreach
 SAFETY_SETTINGS = {
@@ -31,14 +26,32 @@ Tone: Quiet Operator. Professional, direct, zero hype.
 """
 
 
-def discover_businesses():
+def get_supabase() -> Client:
+    """Lazy-initialize the Supabase client so imports don't crash without env vars."""
+    global _supabase
+    if _supabase is None:
+        url: str = os.environ.get("SUPABASE_URL")
+        key: str = os.environ.get("SUPABASE_KEY")
+        _supabase = create_client(url, key)
+    return _supabase
+
+
+def get_model():
+    """Lazy-initialize the Gemini model."""
+    global _model
+    if _model is None:
+        genai.configure(api_key=os.environ.get("GOOGLE_API_KEY"))
+        _model = genai.GenerativeModel(MODEL_NAME)
+    return _model
+
+
+def discover_businesses(search_query: str = "wealth management firm Vancouver"):
     """Calls Apify Google Maps scraper to find local businesses"""
     token = os.environ.get("APIFY_TOKEN")
     api_url = f"https://api.apify.com/v2/acts/apify~google-maps-scraper/run-sync-get-dataset-items?token={token}"
 
-    # You can change "wealth management firm Vancouver" to target different ICPs
     payload = {
-        "searchStrings": ["wealth management firm Vancouver"],
+        "searchStrings": [search_query],
         "maxCrawledPlacesPerSearch": 5,
     }
 
@@ -84,6 +97,7 @@ def qualify_and_draft(business):
     - CTA: Ask for a 15-min discovery call.
     """
 
+    model = get_model()
     try:
         response = model.generate_content(
             prompt,
@@ -98,6 +112,7 @@ def qualify_and_draft(business):
 
 def main():
     print("Waking up Zero-Cost BDR agent...")
+    sb = get_supabase()
     businesses = discover_businesses()
 
     for biz in businesses:
@@ -106,7 +121,7 @@ def main():
 
         # Check Supabase if we already contacted them using their website URL
         existing = (
-            supabase.table("leads")
+            sb.table("leads")
             .select("*")
             .eq("website", biz.get("website"))
             .execute()
@@ -128,7 +143,7 @@ def main():
         }
 
         try:
-            supabase.table("leads").insert(data).execute()
+            sb.table("leads").insert(data).execute()
             print(f"Inserted into Supabase: {biz.get('title')}")
         except Exception as e:
             print(f"Supabase insert error for {biz.get('title')}: {e}")
