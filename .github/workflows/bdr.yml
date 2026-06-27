@@ -1,0 +1,30 @@
+name: Pacific Yew BDR Agent
+
+on:
+  schedule:
+    - cron: '0 16 * * 1-5'  # 8 AM PST Mon-Fri
+  workflow_dispatch:  # Allow manual triggering
+
+jobs:
+  run-bdr:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run BDR Agent
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+        run: python bdr_agent.py
