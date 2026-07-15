@@ -289,13 +289,18 @@ def get_sheet():
             _sheet = sh.worksheet(SHEET_TAB)
         except gspread.WorksheetNotFound:
             _sheet = sh.add_worksheet(title=SHEET_TAB, rows=1000, cols=len(HEADERS))
-        if _sheet.col_count < len(HEADERS):
-            _sheet.add_cols(len(HEADERS) - _sheet.col_count)
         existing = _sheet.row_values(1)
         if not existing:
             _sheet.append_row(HEADERS)
-        elif existing != HEADERS:
-            _sheet.update("A1", [HEADERS])  # extend header, existing data columns stay put
+        else:
+            # Append only MISSING columns to the end — never reorder existing
+            # ones, so pre-existing data stays aligned to its original columns.
+            missing = [h for h in HEADERS if h not in existing]
+            if missing:
+                new_header = existing + missing
+                if _sheet.col_count < len(new_header):
+                    _sheet.add_cols(len(new_header) - _sheet.col_count)
+                _sheet.update("A1", [new_header])
     return _sheet
 
 
@@ -398,7 +403,11 @@ def send_approved(limit: int = None) -> int:
             print(f"No email for {lead.get('business_name')} — marked NEEDS_EMAIL.")
             continue
         subject = lead.get("email_subject") or f"Quick idea for {lead.get('business_name', 'your team')}"
-        body = lead.get("email_body") or lead.get("agent_analysis", "")
+        body = (lead.get("email_body") or lead.get("agent_analysis") or "").strip()
+        if len(body) < 20:  # no usable draft — don't send an empty shell
+            update_lead(lead["_row"], {"status": "NEEDS_DRAFT"})
+            print(f"Empty/short body for {lead.get('business_name')} — marked NEEDS_DRAFT.")
+            continue
         result = send_email(to, subject, body)
         if result == "SENT":
             update_lead(lead["_row"], {"status": "SENT", "sent_at": datetime.now(timezone.utc).isoformat()})
