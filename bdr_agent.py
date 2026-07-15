@@ -281,35 +281,68 @@ def send_email(to_addr: str, subject: str, body: str) -> str:
         return f"ERROR: {e}"
 
 
+# ─── Search queries (Pacific Yew ICP) ────────────────────────────────────────
+# Lower Mainland businesses that run software (booking, CRM, job/case mgmt,
+# intake, scheduling) Pacific Yew can automate. Rotated daily so each run pulls
+# a fresh slice instead of re-scraping the same pool.
+CITIES = ["Vancouver", "Surrey", "Burnaby", "Richmond", "Coquitlam", "Langley", "North Vancouver"]
+NICHES = [
+    "HVAC company", "plumbing company", "electrician", "roofing company",
+    "landscaping company", "general contractor", "pest control company",
+    "law firm", "personal injury lawyer", "family law firm", "immigration lawyer",
+    "physiotherapy clinic", "chiropractor", "dental clinic", "massage therapy clinic",
+    "veterinary clinic", "optometrist", "med spa", "real estate brokerage",
+    "accounting firm", "insurance broker", "mortgage broker",
+]
+# Full niche x city grid
+SEARCH_QUERIES = [f"{n} {c}" for c in CITIES for n in NICHES]
+QUERIES_PER_RUN = int(os.environ.get("QUERIES_PER_RUN", "6"))
+
+
+def queries_for_today():
+    """Deterministically rotate through SEARCH_QUERIES by day-of-year so each
+    run gets a different, non-overlapping slice (wraps around the full list)."""
+    n = len(SEARCH_QUERIES)
+    start = (datetime.now().timetuple().tm_yday * QUERIES_PER_RUN) % n
+    return [SEARCH_QUERIES[(start + i) % n] for i in range(min(QUERIES_PER_RUN, n))]
+
+
 # ─── Pipeline ────────────────────────────────────────────────────────────────
 def main():
     print("Waking up Pacific Yew BDR agent...")
-    businesses = discover_businesses()
+    queries = queries_for_today()
+    print(f"Today's searches ({len(queries)}): {queries}")
 
-    for biz in businesses:
-        if not biz.get("website"):
-            continue
-        if dedup_exists(biz.get("website")):
-            print(f"Already contacted: {biz.get('title')}")
-            continue
+    seen_websites = set()
+    for query in queries:
+        print(f"\n── Searching: {query} ──")
+        businesses = discover_businesses(query)
+        for biz in businesses:
+            site = biz.get("website")
+            if not site or site in seen_websites:
+                continue
+            seen_websites.add(site)
+            if dedup_exists(site):
+                print(f"Already contacted: {biz.get('title')}")
+                continue
 
-        print(f"Qualifying: {biz.get('title')}")
-        agent_output = qualify_and_draft(biz)
+            print(f"Qualifying: {biz.get('title')}")
+            agent_output = qualify_and_draft(biz)
 
-        data = {
-            "business_name": biz.get("title"),
-            "website": biz.get("website"),
-            "phone": biz.get("phone"),
-            "email": biz.get("email", ""),
-            "agent_analysis": agent_output,
-            "status": "DRAFT_READY",
-        }
+            data = {
+                "business_name": biz.get("title"),
+                "website": site,
+                "phone": biz.get("phone"),
+                "email": biz.get("email", ""),
+                "agent_analysis": agent_output,
+                "status": "DRAFT_READY",
+            }
 
-        try:
-            insert_lead(data)
-            print(f"Inserted into Sheets: {biz.get('title')}")
-        except Exception as e:
-            print(f"Sheets insert error for {biz.get('title')}: {e}")
+            try:
+                insert_lead(data)
+                print(f"Inserted into Sheets: {biz.get('title')}")
+            except Exception as e:
+                print(f"Sheets insert error for {biz.get('title')}: {e}")
 
 
 if __name__ == "__main__":
