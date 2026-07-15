@@ -1,6 +1,9 @@
 # Secrets
 .env
 
+# Google service-account credentials (never commit)
+creds/
+
 # Python
 __pycache__/
 *.py[cod]
@@ -11,3 +14,7 @@ build/
 # Virtual env
 venv/
 .venv/
+
+# Build artifacts
+dist/
+*.lnk

@@ -1,5 +1,5 @@
-supabase
+gspread
+google-auth
 requests
-google-generativeai
 streamlit
 python-dotenv

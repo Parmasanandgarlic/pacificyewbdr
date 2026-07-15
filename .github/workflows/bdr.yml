@@ -2,7 +2,7 @@ name: Pacific Yew BDR Agent
 
 on:
   schedule:
-    - cron: '0 16 * * 1-5'  # 8 AM PST Mon-Fri
+    - cron: '0 15 * * *'  # 8 AM PDT daily (GitHub UTC; adjust for DST)
   workflow_dispatch:  # Allow manual triggering
 
 jobs:
@@ -21,10 +21,20 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Write Google service-account JSON
+        run: |
+          mkdir -p creds
+          echo "${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}" > creds/service_account.json
+
       - name: Run BDR Agent
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
-          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_MODEL: ${{ secrets.OPENROUTER_MODEL }}
+          GOOGLE_SHEET_NAME: ${{ secrets.GOOGLE_SHEET_NAME }}
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+          GOOGLE_SHEET_TAB: ${{ secrets.GOOGLE_SHEET_TAB }}
+          REPLY_TO_EMAIL: ${{ secrets.REPLY_TO_EMAIL }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         run: python bdr_agent.py
