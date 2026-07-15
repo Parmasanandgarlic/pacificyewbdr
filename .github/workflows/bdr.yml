@@ -1,5 +1,8 @@
 name: Pacific Yew BDR Agent
 
+permissions:
+  contents: read
+
 on:
   schedule:
     - cron: '0 15 * * *'  # 8 AM PDT daily (GitHub UTC; adjust for DST)
