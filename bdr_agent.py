@@ -128,22 +128,38 @@ def qualify_and_draft(business):
 def analyze_and_draft(business, website_text):
     """One LLM call that returns a dict: {qualified, subject, body}.
     Parses a strict format so we can store a clean, send-ready subject + body."""
-    system_prompt = f"You are a fractional COO and BDR for Pacific Yew (pacificyew.pro).\n{PACIFIC_YEW_ICP}"
+    system_prompt = (
+        "You are the BDR for Pacific Yew (pacificyew.pro), a SOFTWARE AUTOMATION agency in "
+        "Vancouver, BC. We build AI automations (booking reminders, follow-ups, client records, "
+        "invoicing) for local service businesses like HVAC, plumbers, clinics and law firms.\n"
+        "CRITICAL: 'Pacific Yew' is our company NAME only. It is NOT about wood, lumber, trees, "
+        "carpentry or timber. NEVER mention wood, yew trees, lumber, sawmills or carpentry. "
+        "We sell software automation, nothing physical.\n"
+        "Voice rules — follow these exactly:\n"
+        "- Write like a sharp local operator talking to a busy business owner, not a tech vendor.\n"
+        "- NO jargon. Never use 'data graph', 'relationship intelligence', 'internal OS', "
+        "'architecture', or 'fractional COO'. Say what it DOES in plain words.\n"
+        "- Be concrete: name the actual time-sucks (no-shows, double-bookings, missed follow-ups, "
+        "chasing late payments, client details scattered across texts/email).\n"
+        "- Short. 3-4 sentences. One clear ask.\n"
+        "- Confident but never hypey or salesy. No exclamation marks.\n"
+    )
     user_prompt = f"""
 Business: {business.get('title')}
 Website: {business.get('website')}
 Website Text (excerpt): {website_text[:3000]}
 
-Write a cold outreach email. Return EXACTLY this format, nothing else:
+Write ONE cold outreach email. Return EXACTLY this format, nothing else:
 
 QUALIFIED: <Yes or No, plus a 1-line reason>
-SUBJECT: <compelling subject line, under 60 characters, no clickbait>
+SUBJECT: <a specific, plain subject under 60 chars — reference their trade or a concrete pain, no clickbait>
 BODY:
-<a 4-sentence cold email. Sentence 1: a specific hook about THEIR business from the website.
-Sentence 2: we build internal AI automation / data graph for relationship-based service businesses.
-Sentence 3: we are not a marketing agency — we build the internal system.
-Sentence 4: ask for a 15-minute discovery call.
-Do NOT include a signature, greeting name you don't know, or any footer.>
+<3-4 sentence email.
+- Sentence 1: a specific, true observation about THEIR business or how they likely operate (from the website).
+- Sentence 2: what we do in plain language — e.g. "we set up the automations that handle your follow-ups, booking reminders, and client records so nothing slips through."
+- Sentence 3: the concrete payoff for them (fewer no-shows, less admin, more jobs booked) — keep it grounded, not a promise of miracles.
+- Sentence 4: a low-pressure ask for a 15-minute call. End on that.
+Do NOT include a greeting name you don't know, a signature, or a footer.>
 """
     out = _or_chat(system_prompt, user_prompt) or ""
     qualified = _extract(out, r"QUALIFIED:\s*(.+?)(?:\n|$)")
