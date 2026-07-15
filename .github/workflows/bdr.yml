@@ -26,7 +26,8 @@ jobs:
       - name: Write Google service-account JSON
         run: |
           mkdir -p creds
-          echo "${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}" > creds/service_account.json
+          echo "${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON_B64 }}" | base64 -d > creds/service_account.json
+          python -c "import json; json.load(open('creds/service_account.json')); print('service_account.json is valid JSON')"
 
       - name: Run BDR Agent
         env:
