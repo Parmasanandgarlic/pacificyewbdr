@@ -40,4 +40,9 @@ jobs:
           REPLY_TO_EMAIL: ${{ secrets.REPLY_TO_EMAIL }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          SENDER_NAME: ${{ secrets.SENDER_NAME }}
+          SENDER_ADDRESS: ${{ secrets.SENDER_ADDRESS }}
+          SENDER_WEBSITE: ${{ secrets.SENDER_WEBSITE }}
+          SEND_LIMIT: ${{ secrets.SEND_LIMIT }}
+          QUERIES_PER_RUN: ${{ secrets.QUERIES_PER_RUN }}
         run: python bdr_agent.py
