@@ -8,7 +8,9 @@ load_dotenv()
 
 from bdr_agent import (
     discover_businesses,
-    qualify_and_draft,
+    analyze_and_draft,
+    scrape_website,
+    scrape_email,
     get_leads,
     dedup_exists,
     insert_lead,
@@ -99,6 +101,8 @@ st.markdown(
     .status-draft { background: rgba(245,158,11,0.15); color: #f59e0b; }
     .status-approved { background: rgba(16,185,129,0.15); color: #10b981; }
     .status-rejected { background: rgba(239,68,68,0.15); color: #ef4444; }
+    .status-sent { background: rgba(59,130,246,0.15); color: #3b82f6; }
+    .status-needs { background: rgba(148,163,184,0.15); color: #94a3b8; }
 
     .metric-card {
         background: linear-gradient(135deg, #111827, #1a2332);
@@ -145,27 +149,14 @@ st.markdown(
 )
 
 
-# ─── Helper: extract email draft from agent analysis ──────────────────────────
-def extract_email_draft(analysis_text: str) -> str:
-    if not analysis_text:
-        return ""
-    patterns = [
-        r"(?:Subject:.*?\n)([\s\S]+)",
-        r"(?:Email Draft:?|Draft:?|Cold Email:?)\s*\n([\s\S]+)",
-        r"(?:Dear|Hi|Hello)\s+[\w\s,]+\s*[\s\S]+",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, analysis_text, re.IGNORECASE)
-        if match:
-            return match.group(0).strip()
-    return analysis_text
-
-
 def get_status_badge(status: str) -> str:
     css_class = {
         "DRAFT_READY": "status-draft",
         "APPROVED": "status-approved",
         "REJECTED": "status-rejected",
+        "SENT": "status-sent",
+        "NEEDS_EMAIL": "status-needs",
+        "NEEDS_DRAFT": "status-needs",
     }.get(status, "status-draft")
     return f'<span class="status-badge {css_class}">{status}</span>'
 
@@ -180,9 +171,9 @@ with st.sidebar:
 
     search_query = st.text_input(
         "Search Query",
-        value="wealth management firm Vancouver",
-        placeholder="e.g. luxury real estate Surrey",
-        help="Apify Google Maps search string",
+        value="HVAC company Vancouver",
+        placeholder="e.g. dental clinic Surrey",
+        help="Web search string for discovery (free DuckDuckGo).",
     )
 
     if st.button("🎯 Run Agent Now", use_container_width=True, type="primary"):
@@ -199,15 +190,20 @@ with st.sidebar:
                     skipped += 1
                     continue
 
-                agent_output = qualify_and_draft(biz)
+                # Unified path: scrape site + email, then draft (new plain voice)
+                website_text = scrape_website(biz.get("website", ""))
+                email = scrape_email(biz.get("website", ""))
+                draft = analyze_and_draft(biz, website_text)
 
                 data = {
                     "business_name": biz.get("title"),
                     "website": biz.get("website"),
-                    "phone": biz.get("phone"),
-                    "email": biz.get("email", ""),
-                    "agent_analysis": agent_output,
-                    "status": "DRAFT_READY",
+                    "phone": biz.get("phone", ""),
+                    "email": email,
+                    "agent_analysis": draft.get("qualified", ""),
+                    "email_subject": draft.get("subject", ""),
+                    "email_body": draft.get("body", ""),
+                    "status": "DRAFT_READY" if email else "NEEDS_EMAIL",
                 }
                 try:
                     insert_lead(data)
@@ -219,18 +215,19 @@ with st.sidebar:
         st.rerun()
 
     st.markdown("---")
-    st.caption("Pacific Yew · Relationship Intelligence OS")
-    st.caption("v1.0 · Command Center")
+    st.caption("Pacific Yew · Automation for local service businesses")
+    st.caption("v2.0 · Command Center")
 
 
 # ─── Main Area ────────────────────────────────────────────────────────────────
 st.markdown("## 📋 Lead Queue & Draft Review")
 
-all_leads = get_leads(limit=50)
+all_leads = get_leads(limit=200)
 
 draft_count = sum(1 for l in all_leads if l.get("status") == "DRAFT_READY")
 approved_count = sum(1 for l in all_leads if l.get("status") == "APPROVED")
 rejected_count = sum(1 for l in all_leads if l.get("status") == "REJECTED")
+sent_count = sum(1 for l in all_leads if l.get("status") == "SENT")
 
 col_m1, col_m2, col_m3, col_m4 = st.columns(4)
 with col_m1:
@@ -240,18 +237,20 @@ with col_m2:
 with col_m3:
     st.markdown(f"""<div class="metric-card"><div class="metric-value">{approved_count}</div><div class="metric-label">Approved</div></div>""", unsafe_allow_html=True)
 with col_m4:
-    st.markdown(f"""<div class="metric-card"><div class="metric-value">{rejected_count}</div><div class="metric-label">Rejected</div></div>""", unsafe_allow_html=True)
+    st.markdown(f"""<div class="metric-card"><div class="metric-value">{sent_count}</div><div class="metric-label">Sent</div></div>""", unsafe_allow_html=True)
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-draft_leads = [l for l in all_leads if l.get("status") == "DRAFT_READY"]
+# Reviewable = anything not yet sent/rejected
+reviewable = [l for l in all_leads if l.get("status") not in ("SENT", "REJECTED")]
 
-if not draft_leads:
-    st.info("🔍 No leads with status **DRAFT_READY**. Run the agent from the sidebar to discover new leads.")
+if not reviewable:
+    st.info("🔍 No leads to review. Run the agent from the sidebar to discover new leads.")
     st.stop()
 
 lead_options = {
-    f"{l['business_name']}  ·  {l.get('website', 'N/A')}": l for l in draft_leads
+    f"{l['business_name']}  ·  {l.get('website', 'N/A')}  ·  {l.get('status', 'DRAFT_READY')}": l
+    for l in reviewable
 }
 
 selected_label = st.selectbox(
@@ -280,42 +279,65 @@ with col_left:
 
     st.markdown(f"**Phone:** {lead.get('phone', 'N/A')}")
     st.markdown(f"**Email:** {lead.get('email', 'N/A')}")
+    if not lead.get("email"):
+        st.warning("No email scraped — send will be skipped until one is added.", icon="⚠️")
 
-    with st.expander("📄 Full Agent Analysis", expanded=False):
+    with st.expander("📄 Qualification Note", expanded=False):
         st.text(lead.get("agent_analysis", "No analysis available."))
 
 with col_right:
     st.markdown("### ✉️ Email Draft Editor")
 
-    draft_text = extract_email_draft(lead.get("agent_analysis", ""))
+    subject = lead.get("email_subject", "") or lead.get("business_name", "")
+    body = lead.get("email_body", "") or lead.get("agent_analysis", "")
+
+    edited_subject = st.text_input("Subject", value=subject, key=f"subj_{lead_row}")
     edited_draft = st.text_area(
-        "Edit the email draft below:",
-        value=draft_text,
-        height=300,
+        "Edit the email body below:",
+        value=body,
+        height=320,
         key=f"draft_{lead_row}",
         label_visibility="collapsed",
     )
 
 st.markdown("<br>", unsafe_allow_html=True)
-btn_col1, btn_col2, btn_col3, _ = st.columns([1, 1, 1, 2])
+btn_col1, btn_col2, btn_col3, btn_col4 = st.columns([1, 1, 1, 1])
 
 with btn_col1:
     st.markdown('<div class="approve-btn">', unsafe_allow_html=True)
-    if st.button("✅ Approve & Send", use_container_width=True, key="btn_approve"):
-        update_lead(lead_row, {"status": "APPROVED"})
-        email = lead.get("email", "")
-        if email:
-            result = send_email(email, "Partnership — Pacific Yew AI Automation", edited_draft)
-            if result == "SENT":
-                st.toast("Lead approved & emailed! 🎉", icon="✅")
-            else:
-                st.toast(f"Approved, but send failed: {result}", icon="⚠️")
-        else:
-            st.toast("Approved (no email on file to send).", icon="✅")
+    if st.button("✅ Approve", use_container_width=True, key="btn_approve"):
+        # Save edits, mark APPROVED (does NOT send). Sending happens via the
+        # daily GitHub run (approve-first) or the Send Approved button below.
+        update_lead(lead_row, {
+            "status": "APPROVED",
+            "email_subject": edited_subject,
+            "email_body": edited_draft,
+        })
+        st.toast("Lead approved — will be sent on next dispatch.", icon="✅")
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 
 with btn_col2:
+    if st.button("📤 Send Now", use_container_width=True, key="btn_send"):
+        # Direct send from UI (human-in-the-loop). CASL gate still enforced in send_email.
+        to = (lead.get("email") or "").strip()
+        if not to:
+            st.toast("No email on file — cannot send.", icon="⚠️")
+        else:
+            result = send_email(to, edited_subject, edited_draft)
+            if result == "SENT":
+                update_lead(lead_row, {
+                    "status": "SENT",
+                    "email_subject": edited_subject,
+                    "email_body": edited_draft,
+                    "sent_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+                })
+                st.toast("Sent! 🎉", icon="✅")
+            else:
+                st.toast(f"Send failed: {result}", icon="⚠️")
+        st.rerun()
+
+with btn_col3:
     st.markdown('<div class="reject-btn">', unsafe_allow_html=True)
     if st.button("❌ Reject", use_container_width=True, key="btn_reject"):
         update_lead(lead_row, {"status": "REJECTED"})
@@ -323,8 +345,11 @@ with btn_col2:
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 
-with btn_col3:
+with btn_col4:
     if st.button("💾 Save Edits", use_container_width=True, key="btn_save"):
-        update_lead(lead_row, {"agent_analysis": edited_draft})
+        update_lead(lead_row, {
+            "email_subject": edited_subject,
+            "email_body": edited_draft,
+        })
         st.toast("Edits saved!", icon="💾")
         st.rerun()

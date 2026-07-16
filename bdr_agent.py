@@ -361,6 +361,18 @@ def update_lead(row_id: int, fields: dict):
             ws.update_cell(row_id, header.index(k) + 1, v)
 
 
+# ─── Do-Not-Contact (honors CASL unsubscribe requests) ───────────────────────
+# Emails that replied UNSUBSCRIBE are added here; send_email + send_approved
+# both refuse to email them. Editable via the DNC_EMAILS env var (comma-separated)
+# or this constant. The bot never auto-adds to this list — a human does, after
+# reading an unsubscribe reply in contact@pacificyew.pro.
+DNC_EMAILS = [e.strip().lower() for e in os.environ.get("DNC_EMAILS", "").split(",") if e.strip()]
+
+
+def is_blocked(to_addr: str) -> bool:
+    return to_addr.strip().lower() in DNC_EMAILS
+
+
 # ─── Gmail (sending) ────────────────────────────────────────────────────────
 def casl_footer() -> str:
     """CASL-compliant footer: identity + physical address + unsubscribe."""
@@ -381,6 +393,8 @@ def send_email(to_addr: str, subject: str, body: str) -> str:
         return "ERROR: GMAIL_USER / GMAIL_APP_PASSWORD not set."
     if not to_addr:
         return "ERROR: no recipient email on file."
+    if is_blocked(to_addr):
+        return f"ERROR: {to_addr} is on the do-not-contact list (unsubscribed)."
     if not SENDER_ADDRESS:
         return "ERROR: SENDER_ADDRESS not set — required for CASL compliance. Refusing to send."
     msg = EmailMessage()
@@ -417,6 +431,10 @@ def send_approved(limit: int = None) -> int:
         if not to:
             update_lead(lead["_row"], {"status": "NEEDS_EMAIL"})
             print(f"No email for {lead.get('business_name')} — marked NEEDS_EMAIL.")
+            continue
+        if is_blocked(to):
+            update_lead(lead["_row"], {"status": "DO_NOT_CONTACT"})
+            print(f"Blocked (unsubscribed): {to} — marked DO_NOT_CONTACT.")
             continue
         subject = lead.get("email_subject") or f"Quick idea for {lead.get('business_name', 'your team')}"
         body = (lead.get("email_body") or lead.get("agent_analysis") or "").strip()
