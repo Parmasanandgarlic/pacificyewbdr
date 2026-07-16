@@ -347,10 +347,30 @@ def dedup_exists(website: str) -> bool:
 
 
 def insert_lead(data: dict):
+    """Append a single lead row (status defaults to DRAFT_READY)."""
     data = dict(data)
     data.setdefault("created_at", datetime.now(timezone.utc).isoformat())
     row = [data.get(h, "") for h in HEADERS]
     get_sheet().append_row(row)
+
+
+def insert_leads_batch(rows: list):
+    """Atomically append many lead rows in ONE Sheets call.
+
+    Rapid successive append_row calls race (gspread reads-then-writes with a
+    delay), silently dropping rows. Batching into a single append_rows avoids
+    that. Each item is a dict; missing fields default to ''.
+    """
+    if not rows:
+        return 0
+    now = datetime.now(timezone.utc).isoformat()
+    sheet_rows = []
+    for data in rows:
+        data = dict(data)
+        data.setdefault("created_at", now)
+        sheet_rows.append([data.get(h, "") for h in HEADERS])
+    get_sheet().append_rows(sheet_rows, value_input_option="USER_ENTERED")
+    return len(sheet_rows)
 
 
 def update_lead(row_id: int, fields: dict):
@@ -477,11 +497,13 @@ def queries_for_today():
 
 # ─── Pipeline ────────────────────────────────────────────────────────────────
 def discover_and_draft():
-    """Discover → filter directories → scrape email → draft subject+body → store."""
+    """Discover → filter directories → scrape email → draft subject+body → store.
+    New leads are buffered and written in ONE batched Sheets call to avoid the
+    append_row race that silently drops rows under rapid inserts."""
     queries = queries_for_today()
     print(f"Today's searches ({len(queries)}): {queries}")
     seen_websites = set()
-    added = 0
+    buffer = []
     for query in queries:
         print(f"\n── Searching: {query} ──")
         for biz in discover_businesses(query):
@@ -510,12 +532,15 @@ def discover_and_draft():
                 "email_body": draft.get("body", ""),
                 "status": "DRAFT_READY" if email else "NEEDS_EMAIL",
             }
-            try:
-                insert_lead(data)
-                added += 1
-                print(f"Inserted: {biz.get('title')} | email={email or 'none'} | {data['status']}")
-            except Exception as e:
-                print(f"Sheets insert error for {biz.get('title')}: {e}")
+            buffer.append(data)
+            print(f"Buffered: {biz.get('title')} | email={email or 'none'} | {data['status']}")
+    added = 0
+    if buffer:
+        try:
+            added = insert_leads_batch(buffer)
+            print(f"Batch-wrote {added} lead(s) to Sheets.")
+        except Exception as e:
+            print(f"Sheets batch insert error: {e}")
     print(f"\ndiscover_and_draft: {added} new lead(s) added.")
     return added
 
