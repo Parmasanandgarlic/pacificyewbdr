@@ -814,13 +814,39 @@ def send_email(to_email: str, subject: str, body: str) -> str:
         return f"Error sending: {e}"
 
 
+def _already_sent_emails() -> set:
+    """Lowercased set of every address with a SENT record in the Sheet.
+
+    Hard guard against re-sending the same business. A repeat send is a
+    compliance/deliverability liability (and a manual-error trap) — once an
+    address is SENT it must never be mailed again by any run.
+    """
+    try:
+        ws = get_sheet()
+        vals = ws.get_all_values()
+        if len(vals) < 2 or "email" not in vals[0] or "status" not in vals[0]:
+            return set()
+        ecol, scol = vals[0].index("email"), vals[0].index("status")
+        out = set()
+        for r in vals[1:]:
+            if len(r) > max(ecol, scol) and r[scol].strip().upper() == "SENT":
+                out.add(r[ecol].strip().lower())
+        return out
+    except Exception:
+        return set()
+
+
 def send_approved(limit: int = None) -> int:
     """Send ONLY leads whose status == APPROVED and that have an email. Never touches DRAFT_READY.
-    Marks each SENT (+ sent_at) or SEND_ERROR / NEEDS_EMAIL. Returns count sent."""
+    Marks each SENT (+ sent_at) or SEND_ERROR / NEEDS_EMAIL. Returns count sent.
+
+    HARD GUARD: any address already SENT (in this Sheet) is skipped — no repeat
+    sends, ever, regardless of how the lead was approved."""
     limit = limit or SEND_LIMIT
     if not SENDER_ADDRESS:
         print("SENDER_ADDRESS not set — skipping send (CASL). Set it in .env / secrets to enable sending.")
         return 0
+    already_sent = _already_sent_emails()
     leads = get_leads(limit=10000)
     sent = 0
     for lead in leads:
@@ -833,6 +859,12 @@ def send_approved(limit: int = None) -> int:
         if not to:
             update_lead(lead["_row"], {"status": "NEEDS_EMAIL"})
             print(f"No email for {lead.get('business_name')} — marked NEEDS_EMAIL.")
+            continue
+        if to.lower() in already_sent:
+            # Already emailed in a prior run — never repeat. Demote so it isn't
+            # reconsidered and we don't silently drop an APPROVED row unnoticed.
+            update_lead(lead["_row"], {"status": "SENT_DUPLICATE_SKIPPED"})
+            print(f"SKIP repeat send (already SENT): {to} — marked SENT_DUPLICATE_SKIPPED.")
             continue
         # ── CASL/PIPA pre-send guardrail (report §3B) ──
         ok, reason = pre_send_check(lead)
