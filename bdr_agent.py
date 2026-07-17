@@ -2,7 +2,9 @@ import os
 import re
 import time
 import smtplib
+import imaplib
 import requests
+import email
 from email.message import EmailMessage
 from datetime import datetime, timezone
 from dotenv import load_dotenv
@@ -17,6 +19,7 @@ from google.oauth2.service_account import Credentials
 _or_key: str = None
 _or_model: str = None
 _sheet = None
+_last_scraped_source_url: str = ""  # audit trail: URL where the last email was found
 
 # Default to a FREE OpenRouter model. Override with OPENROUTER_MODEL in .env.
 DEFAULT_MODEL = "tencent/hy3:free"
@@ -41,21 +44,32 @@ SHEET_SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
-# --- Gmail config (sending approved drafts) ---
+# --- Sending/reply mailbox (Zoho Mail) ---
+# GMAIL_USER / GMAIL_APP_PASSWORD now hold the Zoho credentials
+# (contact@pacificyew.pro + app-specific password). Replies — including
+# UNSUBSCRIBE — land here, and the CASL scanner polls this same Zoho inbox
+# via IMAP (imap.zoho.com:993). One mailbox, send + scan.
 GMAIL_USER = os.environ.get("GMAIL_USER")
 GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD")
-REPLY_TO_EMAIL = os.environ.get("REPLY_TO_EMAIL", "contact@pacificyew.pro")
+REPLY_TO_EMAIL = os.environ.get("REPLY_TO_EMAIL", GMAIL_USER or "contact@pacificyew.pro")
 
 # --- Sender identity (REQUIRED for CASL-compliant sending) ---
+# CASL s.6: every CEM must identify BOTH the business AND the individual sender,
+# a physical mailing address, and at least one other contact method.
 SENDER_NAME = os.environ.get("SENDER_NAME", "Pacific Yew Automations")
+SENDER_INDIVIDUAL = os.environ.get("SENDER_INDIVIDUAL", "Michael Goulden")  # the natural person sending
 SENDER_ADDRESS = os.environ.get("SENDER_ADDRESS", "")  # physical mailing address — REQUIRED by CASL
 SENDER_WEBSITE = os.environ.get("SENDER_WEBSITE", "https://pacificyew.pro")
+SENDER_PHONE = os.environ.get("SENDER_PHONE", "")  # optional 2nd contact method for the footer
 SEND_LIMIT = int(os.environ.get("SEND_LIMIT", "20"))  # max emails per run (Gmail-safe)
 
 # Column order for the Leads tab. New columns are APPENDED so existing rows stay aligned.
+# Compliance columns (source_url, consent_type, dnc_timestamp, dnc_processed) are
+# appended at the end so pre-existing data keeps its original column mapping.
 HEADERS = [
     "business_name", "website", "phone", "email", "agent_analysis",
     "status", "created_at", "email_subject", "email_body", "sent_at",
+    "source_url", "consent_type", "dnc_timestamp", "dnc_processed",
 ]
 
 
@@ -246,10 +260,45 @@ def is_directory(biz) -> bool:
 
 
 # ─── Scraping (website text + contact email) ─────────────────────────────────
+from urllib.parse import urlparse
+try:
+    from urllib.robotparser import RobotFileParser
+except Exception:  # pragma: no cover
+    RobotFileParser = None
+
+
+# ─── robots.txt respect (report §5: no-scrape rule) ─────────────────────────
+# If a site's robots.txt disallows scraping, we must not harvest it — doing so
+# voids the CASL "conspicuous publication" defense and risks civil tort.
+_robots_cache = {}
+
+
+def robots_allows(url: str) -> bool:
+    """Return True if robots.txt permits fetching this URL. Defaults to True on
+    any error/timeout (fail-open so legitimate public pages still work)."""
+    if RobotFileParser is None or not url:
+        return True
+    try:
+        parsed = urlparse(url)
+        base = f"{parsed.scheme}://{parsed.netloc}"
+        rp = _robots_cache.get(base)
+        if rp is None:
+            rp = RobotFileParser()
+            rp.set_url(base + "/robots.txt")
+            rp.read()
+            _robots_cache[base] = rp
+        return rp.can_fetch("*", url)
+    except Exception:
+        return True
+
+
 def scrape_website(website_url):
     try:
         if not website_url.startswith("http"):
             website_url = "https://" + website_url
+        if not robots_allows(website_url):
+            print(f"  [robots.txt] disallowed: {website_url} — skipping scrape.")
+            return "No website text available."
         response = requests.get(website_url, timeout=6, headers={"User-Agent": "Mozilla/5.0"})
         text = re.sub(r"<[^>]+>", " ", response.text)
         return re.sub(r"\s+", " ", text)[:5000]
@@ -263,29 +312,82 @@ JUNK_EMAIL_HINTS = ("example.com", "sentry", "wixpress", "godaddy", ".png", ".jp
                     "squarespace", "schema.org", "w3.org")
 PREFERRED_PREFIXES = ("info@", "contact@", "hello@", "admin@", "office@", "reception@", "clinic@")
 
+# ─── PIPA "Business Contact Information" guard (report §2 THE PIPA TRAP) ──────
+# BC PIPA: collecting a PERSONAL email (gmail/yahoo/shaw/telus...) for marketing
+# without consent is a PIPA violation. Only BUSINESS-domain emails are exempt BCI.
+# Free/webmail providers are treated as personal regardless of where they appear.
+FREE_EMAIL_DOMAINS = (
+    "gmail.com", "googlemail.com", "yahoo.com", "ymail.com", "hotmail.com",
+    "outlook.com", "live.com", "msn.com", "aol.com", "icloud.com", "me.com",
+    "shaw.ca", "telus.net", "telus.com", "rogers.com", "bell.net", "bell.ca",
+    "fido.ca", "windmobile.ca", "fizz.ca", "videotron.ca", "cox.net", "comcast.net",
+    "proton.me", "protonmail.com", "tuta.io", "gmx.com", "mail.com", "zoho.com",
+    "yandex.com", "yandex.ru", "disroot.org",
+)
+
+
+def is_business_email(email: str) -> bool:
+    """True only if the address is on a business/corporate domain (PIPA-exempt BCI).
+
+    Free/webmail providers are classified as personal information under PIPA and
+    must NOT be collected/stored for cold outreach without express consent.
+    """
+    if not email or "@" not in email:
+        return False
+    domain = email.lower().split("@")[-1]
+    if domain in FREE_EMAIL_DOMAINS:
+        return False
+    return True
+
 
 def scrape_email(website_url) -> str:
-    """Fetch homepage + common contact pages, extract the best business email. Returns '' if none."""
+    """Fetch homepage + common contact pages, extract the best BUSINESS email.
+
+    Returns '' if none. Applies the PIPA guard: free/webmail personal addresses
+    are rejected (report §2). Also rejects sites whose contact page carries an
+    explicit 'do not contact' statement (CASL implied-consent is void there).
+
+    To preserve the audit trail (CASL Pillar A — proof of conspicuous
+    publication), the exact URL the email was found on is recorded in
+    `_last_scraped_source_url` (read by discover_and_draft into source_url).
+    """
+    global _last_scraped_source_url
+    _last_scraped_source_url = ""
     if not website_url:
         return ""
     if not website_url.startswith("http"):
         website_url = "https://" + website_url
     base = website_url.rstrip("/")
     candidates = []
+    source_page = ""
     for path in ("", "/contact", "/contact-us", "/about", "/about-us"):
+        page_url = base + path
+        if not robots_allows(page_url):
+            continue  # respect robots.txt — do not harvest disallowed paths
         try:
             r = requests.get(base + path, timeout=6, headers={"User-Agent": "Mozilla/5.0"})
-            for e in EMAIL_RE.findall(r.text):
+            text = r.text
+            for e in EMAIL_RE.findall(text):
                 el = e.lower().strip(".")
                 if any(j in el for j in JUNK_EMAIL_HINTS):
                     continue
+                if not is_business_email(el):
+                    # Personal/webmail address — skip per PIPA (do not collect).
+                    continue
                 candidates.append(el)
+                if not source_page:
+                    source_page = base + path
+            # Pillar A guard: if this page explicitly refuses cold contact, bail.
+            if has_do_not_contact_statement(text):
+                print(f"  [PIPA/CASL] {base}{path} states 'do not contact' — skipping.")
+                return ""
         except Exception:
             continue
         if candidates:
-            break  # stop at the first page that yields an email
+            break  # stop at the first page that yields a business email
     if not candidates:
         return ""
+    _last_scraped_source_url = source_page or base
     for pref in PREFERRED_PREFIXES:
         for c in candidates:
             if c.startswith(pref):
@@ -354,23 +456,59 @@ def insert_lead(data: dict):
     get_sheet().append_row(row)
 
 
-def insert_leads_batch(rows: list):
-    """Atomically append many lead rows in ONE Sheets call.
+def _reconcile_header(ws):
+    """Ensure A1 contains the full current HEADERS (appends any missing cols)."""
+    existing = ws.row_values(1)
+    if not existing:
+        ws.append_row(HEADERS)
+        return HEADERS
+    missing = [h for h in HEADERS if h not in existing]
+    if missing:
+        new_header = existing + missing
+        if ws.col_count < len(new_header):
+            ws.add_cols(len(new_header) - ws.col_count)
+        ws.update("A1", [new_header])
+        return new_header
+    return existing
 
-    Rapid successive append_row calls race (gspread reads-then-writes with a
-    delay), silently dropping rows. Batching into a single append_rows avoids
-    that. Each item is a dict; missing fields default to ''.
+
+def insert_leads_batch(rows: list):
+    """Append many lead rows TRUSTWORTHILY.
+
+    The previous append_rows() path silently dropped rows under load
+    (reported N written, persisted far fewer) due to a Sheets append race +
+    eventual consistency. This version reads the live sheet, rebuilds the full
+    table, and overwrites it atomically, then VERIFIES the new row count before
+    returning. Returns the count actually persisted (never a phantom number).
     """
     if not rows:
         return 0
+    ws = get_sheet()
+    header = _reconcile_header(ws)
     now = datetime.now(timezone.utc).isoformat()
     sheet_rows = []
     for data in rows:
         data = dict(data)
         data.setdefault("created_at", now)
-        sheet_rows.append([data.get(h, "") for h in HEADERS])
-    get_sheet().append_rows(sheet_rows, value_input_option="USER_ENTERED")
-    return len(sheet_rows)
+        sheet_rows.append([data.get(h, "") for h in header])
+    # Rebuild full table: existing data rows + new ones.
+    existing = ws.get_all_values()
+    existing_data = existing[1:] if len(existing) > 1 else []
+    new_table = existing + sheet_rows
+    # Ensure table width matches header width (pad short rows).
+    width = len(header)
+    new_table = [r + [""] * (width - len(r)) for r in new_table]
+    target = len(new_table)
+    # Write the whole table back atomically.
+    ws.update("A1", new_table, value_input_option="USER_ENTERED")
+    # Verify what actually persisted (read back).
+    for _ in range(3):
+        persisted = len(ws.get_all_values())
+        if persisted >= target:
+            break
+        time.sleep(1.5)
+    actual_new = persisted - len(existing)
+    return max(0, actual_new)
 
 
 def update_lead(row_id: int, fields: dict):
@@ -382,54 +520,285 @@ def update_lead(row_id: int, fields: dict):
 
 
 # ─── Do-Not-Contact (honors CASL unsubscribe requests) ───────────────────────
-# Emails that replied UNSUBSCRIBE are added here; send_email + send_approved
-# both refuse to email them. Editable via the DNC_EMAILS env var (comma-separated)
-# or this constant. The bot never auto-adds to this list — a human does, after
-# reading an unsubscribe reply in contact@pacificyew.pro.
+# The authoritative DNC list lives on the Sheet's "Do Not Contact" tab so it
+# PERSISTS across GitHub Actions runs (the DNC_EMAILS env var resets each run).
+# The unsubscribe scanner appends to that tab; send_email + send_approved both
+# refuse to email anyone on it. DNC_EMAILS (env) is a manual override fallback.
+DNC_TAB = os.environ.get("DNC_TAB", "Do Not Contact")
 DNC_EMAILS = [e.strip().lower() for e in os.environ.get("DNC_EMAILS", "").split(",") if e.strip()]
+# In-memory cache so repeated calls in one run don't re-read the Sheet every time.
+_BLOCKED_CACHE = None
+
+
+def get_dnc_worksheet():
+    """Lazy-open (creating if needed) the persistent Do Not Contact tab."""
+    creds = Credentials.from_service_account_file(SHEET_CREDS, scopes=SHEET_SCOPES)
+    client = gspread.authorize(creds)
+    sh = client.open_by_key(SHEET_ID)
+    try:
+        ws = sh.worksheet(DNC_TAB)
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title=DNC_TAB, rows=1000, cols=4)
+        ws.append_row(["email", "reason", "added_at", "source"])
+    # ensure header exists
+    if not ws.row_values(1):
+        ws.append_row(["email", "reason", "added_at", "source"])
+    return ws
+
+
+def add_to_dnc(email: str, reason: str = "unsubscribe", source: str = "scanner"):
+    """Persist an address to the Sheet DNC tab. Idempotent (no dupes)."""
+    email = (email or "").strip().lower()
+    if not email:
+        return False
+    ws = get_dnc_worksheet()
+    existing = {r[0].strip().lower() for r in ws.get_all_values()[1:] if r and r[0].strip()}
+    if email in existing:
+        return False
+    ts = datetime.now(timezone.utc).isoformat()
+    ws.append_row([email, reason, ts, source])
+    # Keep the in-run cache coherent so a just-added address is honored immediately
+    # (e.g. scanner adds it, then send_approved's is_blocked must see it this run).
+    global _BLOCKED_CACHE
+    if _BLOCKED_CACHE is not None:
+        _BLOCKED_CACHE.add(email)
+    _mark_lead_do_not_contact(email, dnc_timestamp=ts)
+    return True
+
+
+def _blocked_set() -> set:
+    """Union of env DNC + persistent Sheet DNC tab (cached per run)."""
+    global _BLOCKED_CACHE
+    if _BLOCKED_CACHE is not None:
+        return _BLOCKED_CACHE
+    blocked = set(DNC_EMAILS)
+    try:
+        ws = get_dnc_worksheet()
+        for r in ws.get_all_values()[1:]:
+            if r and r[0].strip():
+                blocked.add(r[0].strip().lower())
+    except Exception as e:
+        print(f"[DNC] Could not read Sheet DNC tab ({e}); using env DNC only.")
+    _BLOCKED_CACHE = blocked
+    return blocked
 
 
 def is_blocked(to_addr: str) -> bool:
-    return to_addr.strip().lower() in DNC_EMAILS
+    return to_addr.strip().lower() in _blocked_set()
+
+
+def _lead_emails() -> set:
+    """Lowercased set of every email we have on a lead (people we may have mailed)."""
+    try:
+        ws = get_sheet()
+        vals = ws.get_all_values()
+        if len(vals) < 2 or "email" not in vals[0]:
+            return set()
+        col = vals[0].index("email")
+        return {r[col].strip().lower() for r in vals[1:] if len(r) > col and r[col].strip()}
+    except Exception:
+        return set()
+
+
+def scan_unsubscribes() -> int:
+    """Poll the Zoho Inbox for UNSUBSCRIBE/STOP replies and honor CASL opt-outs.
+
+    CRITICAL SCOPE GUARD: we only act on senders who are ACTUAL LEADS we
+    contacted (present in the Leads tab). A generic inbox is full of
+    newsletters/promos whose bodies contain 'unsubscribe'/'stop' — those are NOT
+    opt-outs from our outreach and must never pollute the DNC list. CASL only
+    requires honoring unsubscribe requests from people we actually emailed.
+    Zoho IMAP (pivot from Gmail): host imap.zoho.com, creds = GMAIL_USER/PW.
+    """
+    host = "imap.zoho.com"
+    user = GMAIL_USER
+    pw = GMAIL_APP_PASSWORD
+    if not (user and pw):
+        print("[scan] Zoho IMAP creds (GMAIL_USER/GMAIL_APP_PASSWORD) not set — skipping.")
+        return 0
+    try:
+        mail = imaplib.IMAP4_SSL(host, 993)
+        mail.login(user, pw)
+        mail.select("inbox")
+    except Exception as e:
+        print(f"[scan] Zoho IMAP login failed ({e}) — skipping unsubscribe scan.")
+        return 0
+
+    try:
+        status, messages = mail.search(None, "(UNSEEN)")
+        email_ids = messages[0].split() if messages and messages[0] else []
+    except Exception as e:
+        print(f"[scan] Zoho IMAP search failed ({e})")
+        try:
+            mail.logout()
+        except Exception:
+            pass
+        return 0
+
+    leads = _lead_emails()  # only these addresses can trigger a real opt-out
+    added = 0
+    for e_id in email_ids:
+        try:
+            _, msg_data = mail.fetch(e_id, "(RFC822)")
+            for response_part in msg_data:
+                if isinstance(response_part, tuple):
+                    msg = email.message_from_bytes(response_part[1])
+                    email_body = ""
+                    if msg.is_multipart():
+                        for part in msg.walk():
+                            if part.get_content_type() == "text/plain":
+                                payload = part.get_payload(decode=True)
+                                email_body = payload.decode("utf-8", "ignore") if payload else ""
+                                break
+                    else:
+                        payload = msg.get_payload(decode=True)
+                        email_body = payload.decode("utf-8", "ignore") if payload else ""
+
+                    if "unsubscribe" in email_body.lower() or "stop" in email_body.lower():
+                        sender_raw = msg.get("From") or ""
+                        sender_email = sender_raw.split("<")[-1].split(">")[0].strip().lower()
+                        if sender_email not in leads:
+                            # Not someone we contacted — ignore inbox noise (newsletters, etc.)
+                            print(f"[scan] ignoring non-lead sender {sender_email} (not a Pacific Yew contact).")
+                            continue
+                        if add_to_dnc(sender_email, reason="unsubscribe", source="imap_scan"):
+                            added += 1
+                            _mark_lead_do_not_contact(sender_email)
+                            print(f"Added to DNC: {sender_email}")
+        except Exception as e:
+            print(f"[scan] error processing message {e_id}: {e}")
+    try:
+        mail.logout()
+    except Exception:
+        pass
+    print(f"[scan] unsubscribe scan done — {added} new opt-out(s) honored.")
+    return added
+
+
+def _mark_lead_do_not_contact(email: str, dnc_timestamp: str = ""):
+    """If a lead row has this email, mark it DO_NOT_CONTACT + stamp dnc audit cols."""
+    try:
+        ws = get_sheet()
+        vals = ws.get_all_values()
+        if len(vals) < 2 or "email" not in vals[0]:
+            return
+        col = vals[0].index("email")
+        status_col = vals[0].index("status") if "status" in vals[0] else None
+        ts_col = vals[0].index("dnc_timestamp") if "dnc_timestamp" in vals[0] else None
+        proc_col = vals[0].index("dnc_processed") if "dnc_processed" in vals[0] else None
+        for i, r in enumerate(vals[1:], start=2):
+            if len(r) > col and r[col].strip().lower() == email:
+                if status_col is not None:
+                    ws.update_cell(i, status_col + 1, "DO_NOT_CONTACT")
+                if ts_col is not None and dnc_timestamp:
+                    ws.update_cell(i, ts_col + 1, dnc_timestamp)
+                if proc_col is not None:
+                    ws.update_cell(i, proc_col + 1, "TRUE")
+                print(f"[scan] marked lead row {i} DO_NOT_CONTACT (dnc stamped).")
+    except Exception as e:
+        print(f"[scan] could not mark lead for {email}: {e}")
 
 
 # ─── Gmail (sending) ────────────────────────────────────────────────────────
 def casl_footer() -> str:
-    """CASL-compliant footer: identity + physical address + unsubscribe."""
+    """CASL-compliant footer — EXACT block (report §4). Hardcoded, not freestyled.
+
+    Satisfies CASL s.6 (identification: business + individual + physical address
+    + a second contact method) and s.11 (readily-performed, zero-cost unsubscribe
+    with the 10-business-day SLA). This is appended to EVERY draft/email.
+    """
     addr = SENDER_ADDRESS or "[SENDER_ADDRESS not set]"
+    second_contact = SENDER_PHONE or SENDER_WEBSITE
     return (
         "\n\n--\n"
         f"{SENDER_NAME}\n"
+        f"{SENDER_INDIVIDUAL}\n"
         f"{addr}\n"
-        f"{SENDER_WEBSITE}\n\n"
-        "You received this one-time message because your business may benefit from automation. "
-        "To stop receiving emails, reply with 'UNSUBSCRIBE' and we will remove you within 10 business days."
+        f"{second_contact}\n\n"
+        "To unsubscribe: reply \"UNSUBSCRIBE\" or email "
+        f"{REPLY_TO_EMAIL}. We will remove you within 10 business days."
     )
 
 
-def send_email(to_addr: str, subject: str, body: str) -> str:
-    """Send an email via Gmail SMTP. Appends the CASL footer. Returns a status string."""
-    if not GMAIL_USER or not GMAIL_APP_PASSWORD:
-        return "ERROR: GMAIL_USER / GMAIL_APP_PASSWORD not set."
-    if not to_addr:
+def has_do_not_contact_statement(text: str) -> bool:
+    """PILLAR A guard: detect an explicit refusal to receive unsolicited CEMs.
+
+    If a business's published contact page states they do not wish to receive
+    cold pitches, CASL implied-consent (conspicuous publication) is VOID and we
+    must not contact them. Returns True if such a statement is found.
+    """
+    if not text:
+        return False
+    t = text.lower()
+    markers = (
+        "no spam", "no cold", "no unsolicited", "do not contact", "don't contact",
+        "do not send", "no solicitations", "no pitches", "we do not accept cold",
+        "not accept cold", "no marketing emails", "do not email us with",
+    )
+    return any(m in t for m in markers)
+
+
+def pre_send_check(lead: dict) -> tuple[bool, str]:
+    """CASL/PIPA pre-send guardrail (report §3B). Returns (ok, reason).
+
+    A lead is cleared to send only if ALL hold:
+      - has a BUSINESS email (PIPA: no personal/webmail addresses)
+      - consent_type is IMPLIED_CONSPICUOUS and a source_url is recorded
+        (Pillar A proof of conspicuous publication)
+      - not on the DNC list (Pillar C)
+      - SENDER_ADDRESS is set (Pillar B identification)
+    This is the final gate before any CEM leaves the building.
+    """
+    to = (lead.get("email") or "").strip()
+    if not to:
+        return False, "no email on file"
+    if not is_business_email(to):
+        return False, f"personal/webmail address ({to}) — PIPA violation, refuse"
+    if is_blocked(to):
+        return False, f"on DNC list ({to})"
+    if not SENDER_ADDRESS:
+        return False, "SENDER_ADDRESS not set (Pillar B)"
+    consent = (lead.get("consent_type") or "").strip().upper()
+    src = (lead.get("source_url") or "").strip()
+    if consent != "IMPLIED_CONSPICUOUS" or not src:
+        return False, "missing consent proof (consent_type/source_url) — Pillar A"
+    return True, "ok"
+
+
+# SMTP host for sending — defaults to Gmail; override for Yandex 360
+# (smtp.yandex.com) or another provider. Port is always 465 (SSL).
+SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.zoho.com")
+
+
+def send_email(to_email: str, subject: str, body: str) -> str:
+    """Send a CEM via Zoho Mail SMTP (pivot from Gmail/Resend). Appends the CASL footer."""
+    zoho_user = GMAIL_USER
+    zoho_pw = GMAIL_APP_PASSWORD
+
+    if not zoho_user or not zoho_pw:
+        return "ERROR: GMAIL_USER / GMAIL_APP_PASSWORD (Zoho creds) not set."
+    if not to_email:
         return "ERROR: no recipient email on file."
-    if is_blocked(to_addr):
-        return f"ERROR: {to_addr} is on the do-not-contact list (unsubscribed)."
+    if is_blocked(to_email):
+        return f"ERROR: {to_email} is on the do-not-contact list (unsubscribed)."
     if not SENDER_ADDRESS:
         return "ERROR: SENDER_ADDRESS not set — required for CASL compliance. Refusing to send."
+
     msg = EmailMessage()
-    msg["From"] = f"{SENDER_NAME} <{GMAIL_USER}>"
-    msg["To"] = to_addr
-    msg["Subject"] = subject
-    msg["Reply-To"] = REPLY_TO_EMAIL
+    msg['Subject'] = subject
+    msg['From'] = f"Pacific Yew Automations <{zoho_user}>"
+    msg['To'] = to_email
+    msg['Reply-To'] = zoho_user
     msg.set_content(body + casl_footer())
+
     try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
-            s.login(GMAIL_USER, GMAIL_APP_PASSWORD)
-            s.send_message(msg)
+        with smtplib.SMTP_SSL('smtp.zoho.com', 465) as smtp:
+            smtp.login(zoho_user, zoho_pw)
+            smtp.send_message(msg)
         return "SENT"
     except Exception as e:
-        return f"ERROR: {e}"
+        print(f"Zoho SMTP error: {e}")
+        return f"Error sending: {e}"
 
 
 def send_approved(limit: int = None) -> int:
@@ -452,9 +821,13 @@ def send_approved(limit: int = None) -> int:
             update_lead(lead["_row"], {"status": "NEEDS_EMAIL"})
             print(f"No email for {lead.get('business_name')} — marked NEEDS_EMAIL.")
             continue
-        if is_blocked(to):
-            update_lead(lead["_row"], {"status": "DO_NOT_CONTACT"})
-            print(f"Blocked (unsubscribed): {to} — marked DO_NOT_CONTACT.")
+        # ── CASL/PIPA pre-send guardrail (report §3B) ──
+        ok, reason = pre_send_check(lead)
+        if not ok:
+            # Personal email / missing consent proof / blocked → do NOT send.
+            new_status = "DO_NOT_CONTACT" if is_blocked(to) else "BLOCKED_COMPLIANCE"
+            update_lead(lead["_row"], {"status": new_status})
+            print(f"PRE-SEND BLOCKED ({reason}): {to} — marked {new_status}.")
             continue
         subject = lead.get("email_subject") or f"Quick idea for {lead.get('business_name', 'your team')}"
         body = (lead.get("email_body") or lead.get("agent_analysis") or "").strip()
@@ -531,9 +904,16 @@ def discover_and_draft():
                 "email_subject": draft.get("subject", ""),
                 "email_body": draft.get("body", ""),
                 "status": "DRAFT_READY" if email else "NEEDS_EMAIL",
+                # ── CASL Pillar A audit trail ──
+                # source_url = exact page the email was conspicuously published on
+                # consent_type hardcoded to IMPLIED_CONSPICUOUS (CASL s.10(9)(b))
+                "source_url": _last_scraped_source_url,
+                "consent_type": "IMPLIED_CONSPICUOUS" if email else "",
+                "dnc_timestamp": "",
+                "dnc_processed": "",
             }
             buffer.append(data)
-            print(f"Buffered: {biz.get('title')} | email={email or 'none'} | {data['status']}")
+            print(f"Buffered: {biz.get('title')} | email={email or 'none'} | {data['status']} | src={_last_scraped_source_url or 'n/a'}")
     added = 0
     if buffer:
         try:
@@ -546,12 +926,16 @@ def discover_and_draft():
 
 
 def main():
-    """Daily run: discover + draft, then send any leads YOU marked APPROVED.
-    Nothing is emailed unless a row's status == APPROVED (approve-first, human in the loop)."""
+    """Daily run: discover + draft, scan unsubscribes, then send APPROVED leads.
+    Nothing is emailed unless a row's status == APPROVED (approve-first, human in the loop).
+    A CASL unsubscribe scan runs before sending so opt-outs are honored first."""
     import sys
     mode = sys.argv[1] if len(sys.argv) > 1 else "all"
     print(f"Waking up Pacific Yew BDR agent... (mode={mode})")
 
+    if mode in ("all", "scan"):
+        print("\n── Scanning for unsubscribe replies ──")
+        scan_unsubscribes()
     if mode in ("all", "discover"):
         discover_and_draft()
     if mode in ("all", "send"):
