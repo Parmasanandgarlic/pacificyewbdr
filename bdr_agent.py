@@ -153,10 +153,16 @@ def analyze_and_draft(business, website_text):
         "- Write like a sharp local operator talking to a busy business owner, not a tech vendor.\n"
         "- NO jargon. Never use 'data graph', 'relationship intelligence', 'internal OS', "
         "'architecture', or 'fractional COO'. Say what it DOES in plain words.\n"
-        "- Be concrete: name the actual time-sucks (no-shows, double-bookings, missed follow-ups, "
-        "chasing late payments, client details scattered across texts/email).\n"
-        "- Short. 3-4 sentences. One clear ask.\n"
-        "- Confident but never hypey or salesy. No exclamation marks.\n"
+        "- Speak in first person plural ('we' / 'our') — a person writing, not a machine.\n"
+        "- Short. 3-4 sentences. One clear, low-pressure ask.\n"
+        "- Confident but never hypey or salesy. No exclamation marks. No spammy subject lines.\n"
+        "- NO invented facts. Do NOT claim to have worked with them, name their clients, cite "
+        "their numbers, or state anything not present in the website text below. If the website "
+        "text is thin, speak only to the well-known operational pain of their TRADE (no-shows, "
+        "double-bookings, chasing late payments, client details scattered across texts/email) — "
+        "these are real industry-wide problems, not claims about this specific business.\n"
+        "- Tailor the value prop to THIS business: lead with the pain most relevant to how THEY "
+        "actually operate (read their site), then say plainly what we'd set up, then the payoff.\n"
     )
     user_prompt = f"""
 Business: {business.get('title')}
@@ -168,18 +174,25 @@ Write ONE cold outreach email. Return EXACTLY this format, nothing else:
 QUALIFIED: <Yes or No, plus a 1-line reason>
 SUBJECT: <a specific, plain subject under 60 chars — reference their trade or a concrete pain, no clickbait>
 BODY:
-<3-4 sentence email.
-- Sentence 1: a specific, true observation about THEIR business or how they likely operate (from the website).
-- Sentence 2: what we do in plain language — e.g. "we set up the automations that handle your follow-ups, booking reminders, and client records so nothing slips through."
-- Sentence 3: the concrete payoff for them (fewer no-shows, less admin, more jobs booked) — keep it grounded, not a promise of miracles.
-- Sentence 4: a low-pressure ask for a 15-minute call. End on that.
+<3-4 sentence email, first-person plural voice.>
+- Sentence 1: a relevant opening tied to how a business in THEIR trade actually runs day to day. Only reference a SPECIFIC fact (service offered, area, hours) if it appears in the website text above — otherwise keep it trade-general, never invent.
+- Sentence 2: what we do in plain language (e.g. put their booking reminders, follow-ups and client records on autopilot so nothing slips through). Vary the wording — do not reuse a fixed phrase across emails.
+- Sentence 3: the concrete payoff for them (fewer no-shows, less admin drag, more jobs booked). Grounded, not a promise of miracles.
+- Sentence 4: a low-pressure ask (a 15-minute call, or offer to send a short walkthrough). End on that.
 Do NOT include a greeting name you don't know, a signature, or a footer.>
 """
     out = _or_chat(system_prompt, user_prompt) or ""
+    # Retry once if the model dropped the BODY section (format flake).
+    if "BODY:" not in out:
+        out = _or_chat(
+            system_prompt,
+            user_prompt + "\n\nIMPORTANT: you MUST output all three sections "
+            "(QUALIFIED:, SUBJECT:, BODY:). Do not stop early.",
+        ) or out
     qualified = _extract(out, r"QUALIFIED:\s*(.+?)(?:\n|$)")
     subject = _extract(out, r"SUBJECT:\s*(.+?)(?:\n|$)")
-    body_m = re.search(r"BODY:\s*(.+)$", out, re.S | re.I)
-    body = body_m.group(1).strip() if body_m else ""
+    body_m = re.search(r"BODY:\s*(.+?)(?:>?\s*$)", out, re.S | re.I)
+    body = (body_m.group(1).strip().strip(">").strip() if body_m else "")
     if not subject:
         subject = f"Quick idea for {business.get('title', 'your team')}"
     return {"qualified": qualified or out.strip()[:300], "subject": subject.strip(), "body": body}
@@ -905,10 +918,14 @@ def discover_and_draft():
                 "email_body": draft.get("body", ""),
                 "status": "DRAFT_READY" if email else "NEEDS_EMAIL",
                 # ── CASL Pillar A audit trail ──
-                # source_url = exact page the email was conspicuously published on
-                # consent_type hardcoded to IMPLIED_CONSPICUOUS (CASL s.10(9)(b))
-                "source_url": _last_scraped_source_url,
-                "consent_type": "IMPLIED_CONSPICUOUS" if email else "",
+                # Consent is IMPLIED by conspicuous publication (CASL s.10(9)(b)):
+                # the business published its contact email on a public web page we
+                # found. Proof = the URL it appeared on, or the business site from
+                # discovery when the email wasn't extractable this run. Consent does
+                # NOT depend on email extraction — only on a real public source URL.
+                # Status (DRAFT_READY vs NEEDS_EMAIL) reflects email availability.
+                "source_url": _last_scraped_source_url or site,
+                "consent_type": "IMPLIED_CONSPICUOUS" if (_last_scraped_source_url or site) else "",
                 "dnc_timestamp": "",
                 "dnc_processed": "",
             }
