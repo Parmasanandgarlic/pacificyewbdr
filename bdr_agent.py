@@ -233,7 +233,7 @@ def _discover_ddg(search_query: str):
                 continue
             seen.add(domain)
             results.append({"title": title or domain, "website": site, "phone": "", "email": ""})
-            if len(results) >= 5:
+            if len(results) >= RESULTS_PER_QUERY:
                 break
         print(f"Discovered {len(results)} businesses via web search.")
         return results
@@ -245,7 +245,7 @@ def _discover_ddg(search_query: str):
 def _discover_apify(search_query: str, actor: str):
     token = os.environ.get("APIFY_TOKEN")
     api_url = f"https://api.apify.com/v2/acts/{actor}/run-sync-get-dataset-items?token={token}"
-    payload = {"searchStrings": [search_query], "maxCrawledPlacesPerSearch": 5}
+    payload = {"searchStrings": [search_query], "maxCrawledPlacesPerSearch": RESULTS_PER_QUERY}
     response = requests.post(api_url, json=payload, timeout=120)
     if response.status_code == 200:
         return response.json()
@@ -450,15 +450,79 @@ def get_leads(limit: int = 50):
 
 
 def dedup_exists(website: str) -> bool:
-    if not website:
-        return False
-    ws = get_sheet()
-    vals = ws.get_all_values()
-    if len(vals) < 2 or "website" not in vals[0]:
-        return False
-    col = vals[0].index("website")
-    target = website.strip().lower()
-    return any(r[col].strip().lower() == target for r in vals[1:] if len(r) > col)
+    return website.strip().lower() in _contacted_universe()["websites"]
+
+
+def _normalize_name(name: str) -> str:
+    """Aggressive normalization so 'Avanti Mechanical HVAC' and
+    'Avanti Mechanical HVAC Ltd.' match as the same business."""
+    import re as _re
+    n = (name or "").lower()
+    n = _re.sub(r"[^a-z0-9 ]", " ", n)
+    # drop legal suffixes / filler words
+    drop = ("inc", "incorporated", "ltd", "ltda", "llc", "corp", "corporation", "co",
+            "company", "companies", "the", "and", "services", "service", "group", "gmbh",
+            "pacific", "canada", "bc", "british", "columbia", "vancouver", "surrey",
+            "langley", "abbotsford", "richmond", "burnaby", "coquitlam", "north")
+    n = " ".join(w for w in n.split() if w not in drop)
+    return " ".join(n.split())
+
+
+def _contacted_universe() -> dict:
+    """Single source of truth for 'we have already dealt with this business'.
+
+    Returns {emails, websites, names} covering EVERY contact outcome that must
+    never be re-mailed or re-discovered:
+      - SENT leads (already emailed)
+      - DNC tab (unsubscribed / opted out)
+      - BLOCKED_COMPLIANCE / DO_NOT_CONTACT / SENT_DUPLICATE_SKIPPED statuses
+    Keyed by email, website, AND normalized business name so a business can't
+    slip back in under a new domain, a www/non-www variant, or a slightly
+    different name. Cached per run.
+    """
+    global _CONTACTED_CACHE
+    if _CONTACTED_CACHE is not None:
+        return _CONTACTED_CACHE
+    emails, websites, names = set(), set(), set()
+    try:
+        ws = get_sheet()
+        vals = ws.get_all_values()
+        if len(vals) >= 2:
+            hdr = vals[0]
+            ecol = hdr.index("email") if "email" in hdr else None
+            wcol = hdr.index("website") if "website" in hdr else None
+            ncol = hdr.index("business_name") if "business_name" in hdr else None
+            scol = hdr.index("status") if "status" in hdr else None
+            sentset = {"SENT", "BLOCKED_COMPLIANCE", "DO_NOT_CONTACT",
+                       "SENT_DUPLICATE_SKIPPED", "NEEDS_EMAIL"}
+            for r in vals[1:]:
+                st = r[scol].strip().upper() if (scol is not None and len(r) > scol) else ""
+                # A business is "contacted" if it was sent, blocked, or opted out.
+                # NEEDS_EMAIL businesses were discovered but never emailed — they
+                # ARE in the universe (don't re-discover the same site), but a
+                # manual re-scrape is allowed only if a NEW email appears (handled
+                # by send guard, not discovery). Treat NEEDS_EMAIL as contacted too
+                # to avoid re-buffering the identical site every run.
+                if ecol is not None and len(r) > ecol and r[ecol].strip():
+                    emails.add(r[ecol].strip().lower())
+                if wcol is not None and len(r) > wcol and r[wcol].strip():
+                    websites.add(r[wcol].strip().lower())
+                if ncol is not None and len(r) > ncol and r[ncol].strip():
+                    names.add(_normalize_name(r[ncol]))
+    except Exception as e:
+        print(f"[universe] Could not read Leads tab ({e}); universe empty.")
+    # Fold in the DNC tab (opt-outs) — emails only.
+    try:
+        for e in _blocked_set():
+            emails.add(e)
+    except Exception:
+        pass
+    _CONTACTED_CACHE = {"emails": emails, "websites": websites, "names": names}
+    return _CONTACTED_CACHE
+
+
+_CONTACTED_CACHE = None
+
 
 
 def insert_lead(data: dict):
@@ -521,6 +585,10 @@ def insert_leads_batch(rows: list):
             break
         time.sleep(1.5)
     actual_new = persisted - len(existing)
+    # Sheet changed — drop the contacted-universe cache so the next discovery
+    # pass (or send) sees the freshly inserted leads.
+    global _CONTACTED_CACHE
+    _CONTACTED_CACHE = None
     return max(0, actual_new)
 
 
@@ -530,6 +598,10 @@ def update_lead(row_id: int, fields: dict):
     for k, v in fields.items():
         if k in header:
             ws.update_cell(row_id, header.index(k) + 1, v)
+    # Sheet changed — drop the contacted-universe cache so subsequent reads
+    # (e.g. the next lead in this same send loop) see the latest state.
+    global _CONTACTED_CACHE
+    _CONTACTED_CACHE = None
 
 
 # ─── Do-Not-Contact (honors CASL unsubscribe requests) ───────────────────────
@@ -814,39 +886,29 @@ def send_email(to_email: str, subject: str, body: str) -> str:
         return f"Error sending: {e}"
 
 
-def _already_sent_emails() -> set:
-    """Lowercased set of every address with a SENT record in the Sheet.
+def _blocked_to_send() -> dict:
+    """Universe of leads that must NEVER be emailed again.
 
-    Hard guard against re-sending the same business. A repeat send is a
-    compliance/deliverability liability (and a manual-error trap) — once an
-    address is SENT it must never be mailed again by any run.
-    """
-    try:
-        ws = get_sheet()
-        vals = ws.get_all_values()
-        if len(vals) < 2 or "email" not in vals[0] or "status" not in vals[0]:
-            return set()
-        ecol, scol = vals[0].index("email"), vals[0].index("status")
-        out = set()
-        for r in vals[1:]:
-            if len(r) > max(ecol, scol) and r[scol].strip().upper() == "SENT":
-                out.add(r[ecol].strip().lower())
-        return out
-    except Exception:
-        return set()
+    Union of SENT + DNC + BLOCKED statuses, keyed by email, website, and
+    normalized business name. A hard guard: once a business is in here, no
+    run — scheduled or manual, however approved — can re-mail it. This is the
+    structural fix for repeat sends."""
+    return _contacted_universe()
 
 
 def send_approved(limit: int = None) -> int:
     """Send ONLY leads whose status == APPROVED and that have an email. Never touches DRAFT_READY.
     Marks each SENT (+ sent_at) or SEND_ERROR / NEEDS_EMAIL. Returns count sent.
 
-    HARD GUARD: any address already SENT (in this Sheet) is skipped — no repeat
+    HARD GUARD: any lead already in the contacted universe (SENT / DNC / BLOCKED,
+    by email OR website OR normalized name) is skipped and demoted — no repeat
     sends, ever, regardless of how the lead was approved."""
     limit = limit or SEND_LIMIT
     if not SENDER_ADDRESS:
         print("SENDER_ADDRESS not set — skipping send (CASL). Set it in .env / secrets to enable sending.")
         return 0
-    already_sent = _already_sent_emails()
+    universe = _blocked_to_send()
+    sent_emails, sent_sites, sent_names = universe["emails"], universe["websites"], universe["names"]
     leads = get_leads(limit=10000)
     sent = 0
     for lead in leads:
@@ -860,11 +922,14 @@ def send_approved(limit: int = None) -> int:
             update_lead(lead["_row"], {"status": "NEEDS_EMAIL"})
             print(f"No email for {lead.get('business_name')} — marked NEEDS_EMAIL.")
             continue
-        if to.lower() in already_sent:
-            # Already emailed in a prior run — never repeat. Demote so it isn't
-            # reconsidered and we don't silently drop an APPROVED row unnoticed.
+        # ── HARD no-resend guard (email / website / name) ──
+        site_key = (lead.get("website") or "").strip().lower()
+        name_key = _normalize_name(lead.get("business_name") or "")
+        if (to.lower() in sent_emails
+                or (site_key and site_key in sent_sites)
+                or (name_key and name_key in sent_names)):
             update_lead(lead["_row"], {"status": "SENT_DUPLICATE_SKIPPED"})
-            print(f"SKIP repeat send (already SENT): {to} — marked SENT_DUPLICATE_SKIPPED.")
+            print(f"SKIP repeat send (already contacted): {to} — marked SENT_DUPLICATE_SKIPPED.")
             continue
         # ── CASL/PIPA pre-send guardrail (report §3B) ──
         ok, reason = pre_send_check(lead)
@@ -894,21 +959,58 @@ def send_approved(limit: int = None) -> int:
 
 
 # ─── Search queries (Pacific Yew ICP) ────────────────────────────────────────
-CITIES = ["Vancouver", "Surrey", "Burnaby", "Richmond", "Coquitlam", "Langley", "North Vancouver"]
+# Lower Mainland + Fraser Valley + Greater Vancouver coverage.
+CITIES = [
+    "Vancouver", "Surrey", "Burnaby", "Richmond", "Coquitlam", "Langley",
+    "North Vancouver", "Abbotsford", "Chilliwack", "Maple Ridge", "Delta",
+    "White Rock", "Port Coquitlam", "New Westminster", "Pitt Meadows",
+    "Mission", "West Vancouver", "Port Moody", "Tsawwassen",
+]
+# Service trades, clinics, and professional-services firms we can help.
 NICHES = [
-    "HVAC company", "plumbing company", "electrician", "roofing company",
-    "landscaping company", "general contractor", "pest control company",
-    "law firm", "personal injury lawyer", "family law firm", "immigration lawyer",
+    # Trades
+    "HVAC company", "furnace repair", "air conditioning company", "plumbing company",
+    "drain cleaning", "electrician", "roofing company", "roof repair",
+    "landscaping company", "lawn care", "general contractor", "renovation company",
+    "kitchen renovation", "bathroom renovation", "painting company", "flooring company",
+    "concrete company", "excavation company", "fencing company", "deck builder",
+    "solar panel company", "window cleaning", "gutter cleaning", "junk removal",
+    "pest control company", "pressure washing", "snow removal", "property management",
+    "handyman", "carpet cleaning", "moving company", "appliance repair",
+    # Automotive
+    "auto repair", "mechanic", "auto body shop", "tire shop", "car detailing",
+    # Cleaning / home
+    "house cleaning", "commercial cleaning", "maid service", "cleaning company",
+    # Personal services
+    "hair salon", "barber shop", "nail salon", "med spa", "esthetician",
+    "tattoo studio", "pet grooming", "dog daycare", "daycare",
+    # Health clinics
     "physiotherapy clinic", "chiropractor", "dental clinic", "massage therapy clinic",
-    "veterinary clinic", "optometrist", "med spa", "real estate brokerage",
-    "accounting firm", "insurance broker", "mortgage broker",
+    "RMT clinic", "veterinary clinic", "optometrist", "dentist", "orthodontist",
+    "podiatrist", "hearing clinic", "speech therapy", "counseling", "therapy clinic",
+    "dermatology clinic", "walk-in clinic", "senior care", "home care",
+    # Legal / finance / professional
+    "law firm", "personal injury lawyer", "family law firm", "immigration lawyer",
+    "real estate lawyer", "notary public", "paralegal", "accounting firm",
+    "bookkeeping", "tax preparation", "insurance broker", "mortgage broker",
+    "financial advisor", "real estate brokerage", "insurance agency",
+    # Other local pro services
+    "photographer", "marketing agency", "web design", "IT support", "managed service provider",
+    "recruiter", "fitness studio", "gym", "yoga studio",
 ]
 SEARCH_QUERIES = [f"{n} {c}" for c in CITIES for n in NICHES]
-QUERIES_PER_RUN = int(os.environ.get("QUERIES_PER_RUN", "6"))
+QUERIES_PER_RUN = int(os.environ.get("QUERIES_PER_RUN", "12"))
+RESULTS_PER_QUERY = int(os.environ.get("RESULTS_PER_QUERY", "8"))  # businesses pulled per search
 
 
 def queries_for_today():
+    """Queries for this run. Normally a rotating window of QUERIES_PER_RUN
+    (spreads coverage across the full query list over many days). If BACKFILL=1
+    is set (manual large sweep), returns EVERY query at once for a full scan."""
     n = len(SEARCH_QUERIES)
+    if os.environ.get("BACKFILL", "").strip() == "1":
+        print("BACKFILL mode: scanning ALL query combinations.")
+        return list(SEARCH_QUERIES)
     start = (datetime.now().timetuple().tm_yday * QUERIES_PER_RUN) % n
     return [SEARCH_QUERIES[(start + i) % n] for i in range(min(QUERIES_PER_RUN, n))]
 
