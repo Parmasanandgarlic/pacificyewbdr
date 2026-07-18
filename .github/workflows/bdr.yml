@@ -2,7 +2,7 @@ name: Pacific Yew BDR Agent
 
 on:
   schedule:
-    - cron: '0 15 * * *'
+    - cron: '0 15 * * *'   # 8am PDT. Re-enabled 2026-07-18 after Sheet dedup + doubling guard added.
   workflow_dispatch:
 
 permissions:

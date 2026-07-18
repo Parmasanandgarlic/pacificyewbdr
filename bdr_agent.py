@@ -449,8 +449,33 @@ def get_leads(limit: int = 50):
     return list(reversed(out))[:limit]
 
 
+def _norm_url(u: str) -> str:
+    """Strip scheme/www/trailing slash + lowercase so http://www.x.com/ and
+    https://x.com match as the same site (the bug that doubled the Sheet)."""
+    u = (u or "").strip().lower()
+    u = re.sub(r"^https?://", "", u)
+    u = re.sub(r"^www\.", "", u)
+    return u.rstrip("/")
+
+
+def already_known(website: str = "", email: str = "", name: str = "") -> bool:
+    """True if this business is already in the contacted universe (SENT/DNC/
+    BLOCKED), matched on normalized website, email, or name. Prevents the
+    discovery pipeline from re-buffering an existing lead under a URL variant
+    (http vs https, www, trailing slash) — the exact failure that duplicated
+    the Sheet on the 2026-07-18 run."""
+    u = _contacted_universe()
+    if email and email.strip().lower() in u["emails"]:
+        return True
+    if website and _norm_url(website) in u["websites"]:
+        return True
+    if name and _normalize_name(name) in u["names"]:
+        return True
+    return False
+
+
 def dedup_exists(website: str) -> bool:
-    return website.strip().lower() in _contacted_universe()["websites"]
+    return already_known(website=website)
 
 
 def _normalize_name(name: str) -> str:
@@ -494,15 +519,16 @@ def _contacted_universe() -> dict:
             ncol = hdr.index("business_name") if "business_name" in hdr else None
             scol = hdr.index("status") if "status" in hdr else None
             sentset = {"SENT", "BLOCKED_COMPLIANCE", "DO_NOT_CONTACT",
-                       "SENT_DUPLICATE_SKIPPED", "NEEDS_EMAIL"}
+                       "SENT_DUPLICATE_SKIPPED"}
             for r in vals[1:]:
                 st = r[scol].strip().upper() if (scol is not None and len(r) > scol) else ""
-                # A business is "contacted" if it was sent, blocked, or opted out.
-                # NEEDS_EMAIL businesses were discovered but never emailed — they
-                # ARE in the universe (don't re-discover the same site), but a
-                # manual re-scrape is allowed only if a NEW email appears (handled
-                # by send guard, not discovery). Treat NEEDS_EMAIL as contacted too
-                # to avoid re-buffering the identical site every run.
+                # Only TRULY-CONTACTED rows belong in the no-resend universe:
+                # SENT (emailed), BLOCKED_COMPLIANCE / DO_NOT_CONTACT (refused or
+                # opted out), SENT_DUPLICATE_SKIPPED (guard hit). DRAFT_READY and
+                # NEEDS_EMAIL are FRESH, uncontacted leads — they must stay
+                # sendable and re-discoverable, so they are deliberately excluded.
+                if st not in sentset:
+                    continue
                 if ecol is not None and len(r) > ecol and r[ecol].strip():
                     emails.add(r[ecol].strip().lower())
                 if wcol is not None and len(r) > wcol and r[wcol].strip():
@@ -550,35 +576,74 @@ def _reconcile_header(ws):
 
 
 def insert_leads_batch(rows: list):
-    """Append many lead rows TRUSTWORTHILY.
+    """Append lead rows TRUSTWORTHILY, with column-order stability.
 
-    The previous append_rows() path silently dropped rows under load
-    (reported N written, persisted far fewer) due to a Sheets append race +
-    eventual consistency. This version reads the live sheet, rebuilds the full
-    table, and overwrites it atomically, then VERIFIES the new row count before
-    returning. Returns the count actually persisted (never a phantom number).
+    Every row — existing AND new — is emitted strictly in canonical HEADERS
+    order via keyed dicts. This makes column shifts impossible: the on-disk
+    position of a field never depends on the sheet's current header order.
+    The previous version rebuilt the table positionally, which shifted values
+    whenever _reconcile_header reordered/added columns.
     """
     if not rows:
         return 0
     ws = get_sheet()
-    header = _reconcile_header(ws)
+    header = _reconcile_header(ws)  # current sheet header (may differ in order)
     now = datetime.now(timezone.utc).isoformat()
-    sheet_rows = []
+
+    # New rows → keyed dicts in canonical HEADERS order.
+    new_dicts = []
     for data in rows:
-        data = dict(data)
-        data.setdefault("created_at", now)
-        sheet_rows.append([data.get(h, "") for h in header])
-    # Rebuild full table: existing data rows + new ones.
+        d = {k: (data.get(k, "") or "") for k in HEADERS}
+        d["created_at"] = data.get("created_at") or now
+        new_dicts.append(d)
+
+    # Belt-and-suspenders: never append a row whose normalized email/site/name
+    # already exists in the live Sheet. This is what structurally prevents the
+    # 2026-07-18 doubling (a discovered lead re-buffered as "new" because its
+    # URL differed by scheme/www/trailing slash from the stored one).
     existing = ws.get_all_values()
     existing_data = existing[1:] if len(existing) > 1 else []
-    new_table = existing + sheet_rows
-    # Ensure table width matches header width (pad short rows).
-    width = len(header)
-    new_table = [r + [""] * (width - len(r)) for r in new_table]
+    existing_keys = set()
+    for r in existing_data:
+        rd = dict(zip(header, list(r) + [""] * (len(header) - len(r))))
+        e = (rd.get("email") or "").strip().lower()
+        w = _norm_url(rd.get("website") or "")
+        n = _normalize_name(rd.get("business_name") or "")
+        if e:
+            existing_keys.add(("email", e))
+        if w:
+            existing_keys.add(("site", w))
+        if n:
+            existing_keys.add(("name", n))
+    before = len(new_dicts)
+    new_dicts = [d for d in new_dicts if not (
+        (d["email"].strip().lower() and ("email", d["email"].strip().lower()) in existing_keys) or
+        (d["website"] and ("site", _norm_url(d["website"])) in existing_keys) or
+        (d["business_name"] and ("name", _normalize_name(d["business_name"])) in existing_keys)
+    )]
+    dropped = before - len(new_dicts)
+    if dropped:
+        print(f"[dedup] skipped {dropped} row(s) already present in Sheet.")
+
+    # Existing rows → keyed dicts via CURRENT header, then re-emitted in HEADERS
+    # order. Corruption already present in existing cells is preserved byte-for-
+    # byte here; the separate repair step is what cleans it. This function is
+    # only about NOT INTRODUCING new shifts.
+    existing = ws.get_all_values()
+    existing_data = existing[1:] if len(existing) > 1 else []
+    existing_dicts = []
+    for r in existing_data:
+        rd = {header[i]: (r[i] if i < len(r) else "") for i in range(len(header))}
+        existing_dicts.append(rd)
+
+    all_dicts = existing_dicts + new_dicts
+    new_table = [[d.get(h, "") for h in HEADERS] for d in all_dicts]
+    new_table = [list(HEADERS)] + new_table
+
     target = len(new_table)
-    # Write the whole table back atomically.
     ws.update("A1", new_table, value_input_option="USER_ENTERED")
     # Verify what actually persisted (read back).
+    persisted = 0
     for _ in range(3):
         persisted = len(ws.get_all_values())
         if persisted >= target:
