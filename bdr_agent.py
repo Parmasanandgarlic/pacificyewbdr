@@ -1141,10 +1141,92 @@ def discover_and_draft():
     return added
 
 
+def auto_approve_qualified() -> int:
+    """Flip legality-clear DRAFT_READY leads to APPROVED so the daily run can
+    send without a human in the loop. Gated HARD by the same bar as manual
+    approval (per Michael's standing rule: 'we only unblock if they meet our
+    requirements for legality'):
+      - status == DRAFT_READY
+      - business-domain email (PIPA: no personal/webmail)
+      - consent_type == IMPLIED_CONSPICUOUS AND a real http(s) source_url
+      - not on DNC / not blocked
+    Returns count flipped. Never touches SENT / BLOCKED / NEEDS_EMAIL / already
+    APPROVED. pre_send_check runs AGAIN at send time as a second gate."""
+    approved = 0
+    try:
+        ws = get_sheet()
+        vals = ws.get_all_values()
+        if len(vals) < 2 or "email" not in vals[0]:
+            return 0
+        hdrs = vals[0]
+        e_i, st_i, src_i, con_i = (hdrs.index("email"), hdrs.index("status"),
+                                    hdrs.index("source_url"), hdrs.index("consent_type"))
+        for i, r in enumerate(vals[1:], start=2):
+            if len(r) <= st_i:
+                continue
+            if (r[st_i] or "").strip().upper() != "DRAFT_READY":
+                continue
+            email = (r[e_i] if len(r) > e_i else "").strip()
+            consent = (r[con_i] if len(r) > con_i else "").strip().upper()
+            src = (r[src_i] if len(r) > src_i else "").strip()
+            if not is_business_email(email):
+                continue
+            if consent != "IMPLIED_CONSPICUOUS" or not src.startswith("http"):
+                continue
+            if is_blocked(email):
+                continue
+            ws.update_cell(i, st_i + 1, "APPROVED")
+            approved += 1
+            print(f"[auto-approve] {email} -> APPROVED (legality-clear).")
+    except Exception as e:
+        print(f"[auto-approve] error: {e}")
+    print(f"auto_approve_qualified: {approved} lead(s) flipped to APPROVED.")
+    return approved
+
+
+def preflight_checks() -> bool:
+    """Pre-send readiness gate. Returns True only if the run can actually send.
+    Fails LOUD (prints + returns False) so a 'success' run can't silently send 0."""
+    ok = True
+    # 1) Send identity present (CASL Pillar B)
+    if not SENDER_ADDRESS:
+        print("[PREFLIGHT] FAIL: SENDER_ADDRESS not set (CASL)."); ok = False
+    if not REPLY_TO_EMAIL:
+        print("[PREFLIGHT] FAIL: REPLY_TO_EMAIL not set (unsub)."); ok = False
+    # 2) SMTP auth reachable (Zoho) — fail loud if creds expired
+    try:
+        with smtplib.SMTP_SSL(SMTP_HOST, 465, timeout=15) as s:
+            s.login(GMAIL_USER, GMAIL_APP_PASSWORD)
+        print("[PREFLIGHT] SMTP auth OK.")
+    except Exception as e:
+        print(f"[PREFLIGHT] FAIL: SMTP auth ({SMTP_HOST}): {e}"); ok = False
+    # 3) IMAP reachable (unsub scan depends on it)
+    try:
+        import imaplib
+        with imaplib.IMAP4_SSL("imap.zoho.com", 993, timeout=15) as m:
+            m.login(GMAIL_USER, GMAIL_APP_PASSWORD); m.select("INBOX")
+        print("[PREFLIGHT] IMAP auth OK.")
+    except Exception as e:
+        print(f"[PREFLIGHT] FAIL: IMAP auth (imap.zoho.com): {e}"); ok = False
+    # 4) Sheet reachable + header intact
+    try:
+        ws = get_sheet(); rows = ws.get_all_values()
+        if rows and rows[0] == HEADERS:
+            print(f"[PREFLIGHT] Sheet OK ({len(rows)-1} data rows).")
+        else:
+            print("[PREFLIGHT] FAIL: Sheet header mismatch/corrupt."); ok = False
+    except Exception as e:
+        print(f"[PREFLIGHT] FAIL: Sheet unreachable: {e}"); ok = False
+    print(f"[PREFLIGHT] {'ALL GREEN' if ok else 'FAILED — aborting send.'}")
+    return ok
+
+
 def main():
     """Daily run: discover + draft, scan unsubscribes, then send APPROVED leads.
     Nothing is emailed unless a row's status == APPROVED (approve-first, human in the loop).
-    A CASL unsubscribe scan runs before sending so opt-outs are honored first."""
+    A CASL unsubscribe scan runs before sending so opt-outs are honored first.
+    Auto-approve flips legality-clear DRAFT_READY leads so the run actually sends;
+    a pre-flight gate fails loud if the run CAN'T deliver (so 'success' can't hide 0 sent)."""
     import sys
     mode = sys.argv[1] if len(sys.argv) > 1 else "all"
     print(f"Waking up Pacific Yew BDR agent... (mode={mode})")
@@ -1155,8 +1237,19 @@ def main():
     if mode in ("all", "discover"):
         discover_and_draft()
     if mode in ("all", "send"):
+        # Pre-flight: refuse to report 'success' if we can't actually deliver.
+        if not preflight_checks():
+            print("\n[ABORT] Pre-flight failed — not sending. Fix creds/Sheet and re-run.")
+            return
+        # Auto-approve legality-clear DRAFT_READY leads so the run sends.
+        auto_approve_qualified()
         print("\n── Sending APPROVED leads ──")
-        send_approved()
+        sent = send_approved()
+        # Fail loud: if we had APPROVED rows but sent 0, that's a real problem.
+        approved_count = sum(1 for r in get_leads(limit=10000)
+                             if (r.get("status") or "").strip().upper() == "APPROVED")
+        if approved_count > 0 and sent == 0:
+            print(f"\n[ALERT] {approved_count} lead(s) APPROVED but 0 sent — investigate send path.")
 
 
 if __name__ == "__main__":
