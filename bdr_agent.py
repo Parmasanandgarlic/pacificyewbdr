@@ -51,7 +51,11 @@ SHEET_SCOPES = [
 # via IMAP (imap.zoho.com:993). One mailbox, send + scan.
 GMAIL_USER = os.environ.get("GMAIL_USER")
 GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD")
-REPLY_TO_EMAIL = os.environ.get("REPLY_TO_EMAIL", GMAIL_USER or "contact@pacificyew.pro")
+# Effective reply/unsub address: explicit REPLY_TO_EMAIL if set (incl. fallback to
+# sender), else derive from GMAIL_USER. NOTE: os.environ.get returns the default ONLY
+# when the var is ABSENT — an empty-string secret would otherwise stay falsy and break
+# the pre-flight. .strip()+or-chain treats empty/missing identically.
+REPLY_TO_EMAIL = (os.environ.get("REPLY_TO_EMAIL") or GMAIL_USER or "contact@pacificyew.pro").strip()
 
 # --- Sender identity (REQUIRED for CASL-compliant sending) ---
 # CASL s.6: every CEM must identify BOTH the business AND the individual sender,
@@ -246,10 +250,13 @@ def _discover_apify(search_query: str, actor: str):
     token = os.environ.get("APIFY_TOKEN")
     api_url = f"https://api.apify.com/v2/acts/{actor}/run-sync-get-dataset-items?token={token}"
     payload = {"searchStrings": [search_query], "maxCrawledPlacesPerSearch": RESULTS_PER_QUERY}
-    response = requests.post(api_url, json=payload, timeout=120)
-    if response.status_code == 200:
-        return response.json()
-    print(f"Apify error: {response.status_code} - {response.text}")
+    try:
+        response = requests.post(api_url, json=payload, timeout=120)
+        if response.status_code == 200:
+            return response.json()
+        print(f"Apify error: {response.status_code} - {response.text[:200]}")
+    except Exception as e:
+        print(f"Apify request failed: {e}")
     return []
 
 
@@ -413,7 +420,16 @@ def get_sheet():
     """Lazy-open the Leads worksheet; reconcile the header to HEADERS (adds new columns)."""
     global _sheet
     if _sheet is None:
-        creds = Credentials.from_service_account_file(SHEET_CREDS, scopes=SHEET_SCOPES)
+        creds_path = SHEET_CREDS
+        if not os.path.exists(creds_path):
+            raise RuntimeError(
+                f"Google service-account creds not found at '{creds_path}'. "
+                f"Set GOOGLE_SHEET_CREDS or place the file. Cannot open the Leads sheet."
+            )
+        try:
+            creds = Credentials.from_service_account_file(creds_path, scopes=SHEET_SCOPES)
+        except Exception as e:
+            raise RuntimeError(f"Failed to load Google creds from '{creds_path}': {e}")
         client = gspread.authorize(creds)
         sh = client.open_by_key(SHEET_ID)
         try:
@@ -1188,11 +1204,13 @@ def preflight_checks() -> bool:
     """Pre-send readiness gate. Returns True only if the run can actually send.
     Fails LOUD (prints + returns False) so a 'success' run can't silently send 0."""
     ok = True
-    # 1) Send identity present (CASL Pillar B)
+    # 1) Send identity present (CASL Pillar B). Use the EFFECTIVE reply address
+    # (explicit REPLY_TO_EMAIL, else GMAIL_USER) so an unset/empty secret can't
+    # abort a perfectly sendable run.
     if not SENDER_ADDRESS:
         print("[PREFLIGHT] FAIL: SENDER_ADDRESS not set (CASL)."); ok = False
-    if not REPLY_TO_EMAIL:
-        print("[PREFLIGHT] FAIL: REPLY_TO_EMAIL not set (unsub)."); ok = False
+    if not (REPLY_TO_EMAIL or GMAIL_USER):
+        print("[PREFLIGHT] FAIL: no reply/unsub address (REPLY_TO_EMAIL + GMAIL_USER both empty)."); ok = False
     # 2) SMTP auth reachable (Zoho) — fail loud if creds expired
     try:
         with smtplib.SMTP_SSL(SMTP_HOST, 465, timeout=15) as s:
