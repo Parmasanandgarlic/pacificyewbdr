@@ -680,9 +680,23 @@ def insert_leads_batch(rows: list):
 def update_lead(row_id: int, fields: dict):
     ws = get_sheet()
     header = ws.row_values(1)
+    # Build Cell objects for batch update to avoid 429 quota crashes.
+    cells = []
     for k, v in fields.items():
         if k in header:
-            ws.update_cell(row_id, header.index(k) + 1, v)
+            cells.append(gspread.Cell(row=row_id, col=header.index(k) + 1, value=v))
+    if cells:
+        # Retry once on 429 (Google Sheets write quota limit ~60/min).
+        for attempt in range(2):
+            try:
+                ws.update_cells(cells)
+                break
+            except gspread.exceptions.APIError as e:
+                if "429" in str(e) and attempt == 0:
+                    print(f"[update_lead] 429 on row {row_id}, sleeping 3s and retrying...")
+                    time.sleep(3)
+                    continue
+                raise
     # Sheet changed — drop the contacted-universe cache so subsequent reads
     # (e.g. the next lead in this same send loop) see the latest state.
     global _CONTACTED_CACHE
@@ -1171,7 +1185,11 @@ def auto_approve_qualified() -> int:
       - consent_type == IMPLIED_CONSPICUOUS AND a real http(s) source_url
       - not on DNC / not blocked
     Returns count flipped. Never touches SENT / BLOCKED / NEEDS_EMAIL / already
-    APPROVED. pre_send_check runs AGAIN at send time as a second gate."""
+    APPROVED. pre_send_check runs AGAIN at send time as a second gate.
+
+    Uses batch update_cells (single API call) instead of row-by-row update_cell
+    to avoid Google Sheets 60-writes-per-minute quota."""
+
     approved = 0
     try:
         ws = get_sheet()
@@ -1181,6 +1199,7 @@ def auto_approve_qualified() -> int:
         hdrs = vals[0]
         e_i, st_i, src_i, con_i = (hdrs.index("email"), hdrs.index("status"),
                                     hdrs.index("source_url"), hdrs.index("consent_type"))
+        to_approve = []
         for i, r in enumerate(vals[1:], start=2):
             if len(r) <= st_i:
                 continue
@@ -1195,9 +1214,16 @@ def auto_approve_qualified() -> int:
                 continue
             if is_blocked(email):
                 continue
-            ws.update_cell(i, st_i + 1, "APPROVED")
-            approved += 1
-            print(f"[auto-approve] {email} -> APPROVED (legality-clear).")
+            to_approve.append((i, email))
+
+        if to_approve:
+            # Batch ALL status updates in ONE API call — avoids 429 quota crash.
+            cells = [gspread.Cell(row=row, col=st_i + 1, value="APPROVED")
+                     for row, _ in to_approve]
+            ws.update_cells(cells)
+            for row, email in to_approve:
+                approved += 1
+                print(f"[auto-approve] {email} -> APPROVED (legality-clear).")
     except Exception as e:
         print(f"[auto-approve] error: {e}")
     print(f"auto_approve_qualified: {approved} lead(s) flipped to APPROVED.")
