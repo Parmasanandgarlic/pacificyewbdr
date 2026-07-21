@@ -21,8 +21,10 @@ _or_model: str = None
 _sheet = None
 _last_scraped_source_url: str = ""  # audit trail: URL where the last email was found
 
-# Default to a FREE OpenRouter model. Override with OPENROUTER_MODEL in .env.
-DEFAULT_MODEL = "tencent/hy3:free"
+# Default to a free OpenRouter model. Override with OPENROUTER_MODEL in .env.
+# tencent/hy3:free died 2026-07 — Gemma 4 26B is the strongest free model with
+# actual rate-limit headroom as of 2026-07-20.
+DEFAULT_MODEL = "google/gemma-4-26b-a4b-it:free"
 
 OR_REFERER = os.environ.get("OR_REFERER", "https://pacificyew.pro")
 OR_TITLE = os.environ.get("OR_TITLE", "Pacific Yew BDR")
