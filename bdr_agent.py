@@ -563,6 +563,12 @@ def _contacted_universe() -> dict:
             emails.add(e)
     except Exception:
         pass
+    # Fold in the immutable Sent Ledger (authoritative: survives crashes).
+    try:
+        ledger_emails = _load_ledger_emails()
+        emails.update(ledger_emails)
+    except Exception:
+        pass
     _CONTACTED_CACHE = {"emails": emails, "websites": websites, "names": names}
     return _CONTACTED_CACHE
 
@@ -985,6 +991,99 @@ def send_email(to_email: str, subject: str, body: str) -> str:
         return f"Error sending: {e}"
 
 
+# ─── Immutable Sent Ledger (authoritative contacted record) ───────────────────
+# This tab is append-ONLY. Once a row is written it is never modified or
+# deleted. Checked BEFORE every SMTP call in send_approved. Written AFTER
+# SMTP success but BEFORE the lead status is updated — so a crash between
+# ledger write and status update still prevents duplicate sends on retry.
+LEDGER_TAB = "Sent Ledger"
+_LEDGER_CACHE = None
+
+
+def _ensure_ledger():
+    """Create the Sent Ledger tab if missing. Return the worksheet."""
+    creds = Credentials.from_service_account_file(SHEET_CREDS, scopes=SHEET_SCOPES)
+    client = gspread.authorize(creds)
+    sh = client.open_by_key(SHEET_ID)
+    try:
+        ws = sh.worksheet(LEDGER_TAB)
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title=LEDGER_TAB, rows=1000, cols=5)
+        ws.append_row(["email", "business_name", "sent_at", "subject", "source"])
+    # Ensure header exists
+    if not ws.row_values(1):
+        ws.append_row(["email", "business_name", "sent_at", "subject", "source"])
+    return ws
+
+
+def _load_ledger_emails() -> set:
+    """Return ALL normalized email addresses ever recorded in the Sent Ledger.
+    Cached per run via _LEDGER_CACHE."""
+    global _LEDGER_CACHE
+    if _LEDGER_CACHE is not None:
+        return _LEDGER_CACHE
+    try:
+        ws = _ensure_ledger()
+        rows = ws.get_all_values()
+        if len(rows) < 2:
+            _LEDGER_CACHE = set()
+            return _LEDGER_CACHE
+        hdr = rows[0]
+        ecol = hdr.index("email") if "email" in hdr else None
+        if ecol is None:
+            _LEDGER_CACHE = set()
+            return _LEDGER_CACHE
+        _LEDGER_CACHE = {r[ecol].strip().lower() for r in rows[1:]
+                         if len(r) > ecol and r[ecol].strip()
+                         and "@" in r[ecol].strip()}
+        return _LEDGER_CACHE
+    except Exception as e:
+        print(f"[ledger] Could not read Sent Ledger ({e}); treating as empty.")
+        _LEDGER_CACHE = set()
+        return _LEDGER_CACHE
+
+
+def _in_sent_ledger(email: str) -> bool:
+    """True if this normalized email has EVER been successfully sent."""
+    if not email or "@" not in email:
+        return False
+    return email.strip().lower() in _load_ledger_emails()
+
+
+def _append_to_ledger(email: str, business_name: str, subject: str,
+                      source: str = "bdr_agent"):
+    """Append one row to the immutable Sent Ledger. Invalidates caches."""
+    try:
+        ws = _ensure_ledger()
+        ws.append_row([
+            email.strip().lower(),
+            (business_name or "").strip(),
+            datetime.now(timezone.utc).isoformat(),
+            (subject or "").strip(),
+            source,
+        ])
+        # Invalidate both ledger cache and contacted-universe cache so
+        # subsequent reads in the same run pick up the new entry.
+        global _LEDGER_CACHE, _CONTACTED_CACHE
+        _LEDGER_CACHE = None
+        _CONTACTED_CACHE = None
+    except Exception as e:
+        print(f"[ledger] ERROR appending to Sent Ledger: {e}")
+        # DO NOT raise — a ledger write failure must NOT block the send.
+        # The lead's status is still being updated and the contacted
+        # cache will include this SENT status on the next check. The
+        # worst case is a duplicate on a future run if BOTH this ledger
+        # write AND the lead status update fail, but that's a last-resort
+        # edge case. The hard guard in send_approved (step 1) handles the
+        # common case.
+
+
+def _invalidate_ledger():
+    """Drop the per-run ledger cache (called after sheet-wide writes)."""
+    global _LEDGER_CACHE
+    _LEDGER_CACHE = None
+
+
 def _blocked_to_send() -> dict:
     """Universe of leads that must NEVER be emailed again.
 
@@ -996,12 +1095,13 @@ def _blocked_to_send() -> dict:
 
 
 def send_approved(limit: int = None) -> int:
-    """Send ONLY leads whose status == APPROVED and that have an email. Never touches DRAFT_READY.
-    Marks each SENT (+ sent_at) or SEND_ERROR / NEEDS_EMAIL. Returns count sent.
+    """Send ONLY leads whose status == APPROVED. Uses an append-only Sent Ledger
+    as the authoritative contacted record (checked BEFORE every SMTP call).
+    Each lead is RESERVED before SMTP, then ledger-written + status-updated
+    after success — so a crash after SMTP but before status update still
+    prevents re-sends on the next run.
 
-    HARD GUARD: any lead already in the contacted universe (SENT / DNC / BLOCKED,
-    by email OR website OR normalized name) is skipped and demoted — no repeat
-    sends, ever, regardless of how the lead was approved."""
+    Returns count sent. Never touches RESERVED / SENT / DRAFT_READY."""
     limit = limit or SEND_LIMIT
     if not SENDER_ADDRESS:
         print("SENDER_ADDRESS not set — skipping send (CASL). Set it in .env / secrets to enable sending.")
@@ -1021,7 +1121,16 @@ def send_approved(limit: int = None) -> int:
             update_lead(lead["_row"], {"status": "NEEDS_EMAIL"})
             print(f"No email for {lead.get('business_name')} — marked NEEDS_EMAIL.")
             continue
-        # ── HARD no-resend guard (email / website / name) ──
+
+        # ── GUARD 1: Immutable Sent Ledger (survives crashes) ──
+        # Checked BEFORE any other guard because the ledger is the single
+        # source of truth for what actually left the SMTP server.
+        if _in_sent_ledger(to):
+            update_lead(lead["_row"], {"status": "SENT_LEDGER_DEDUP"})
+            print(f"SKIP (in Sent Ledger): {to} — marked SENT_LEDGER_DEDUP.")
+            continue
+
+        # ── GUARD 2: Contacted universe (SENT/DNC/BLOCKED statuses) ──
         site_key = (lead.get("website") or "").strip().lower()
         name_key = _normalize_name(lead.get("business_name") or "")
         if (to.lower() in sent_emails
@@ -1030,26 +1139,42 @@ def send_approved(limit: int = None) -> int:
             update_lead(lead["_row"], {"status": "SENT_DUPLICATE_SKIPPED"})
             print(f"SKIP repeat send (already contacted): {to} — marked SENT_DUPLICATE_SKIPPED.")
             continue
-        # ── CASL/PIPA pre-send guardrail (report §3B) ──
+
+        # ── GUARD 3: CASL/PIPA pre-send guardrail ──
         ok, reason = pre_send_check(lead)
         if not ok:
-            # Personal email / missing consent proof / blocked → do NOT send.
             new_status = "DO_NOT_CONTACT" if is_blocked(to) else "BLOCKED_COMPLIANCE"
             update_lead(lead["_row"], {"status": new_status})
             print(f"PRE-SEND BLOCKED ({reason}): {to} — marked {new_status}.")
             continue
+
+        # ── RESERVED: claim this lead before SMTP ──
+        # If the run crashes after this point, a future run will find the
+        # lead in RESERVED status and skip it (send_approved only picks
+        # APPROVED). The Sent Ledger check (Guard 1) is the structural
+        # backstop: even if someone manually sets the lead back to APPROVED,
+        # the ledger will reject the duplicate.
+        update_lead(lead["_row"], {"status": "RESERVED"})
+
         subject = lead.get("email_subject") or f"Quick idea for {lead.get('business_name', 'your team')}"
         body = (lead.get("email_body") or lead.get("agent_analysis") or "").strip()
-        if len(body) < 20:  # no usable draft — don't send an empty shell
+        if len(body) < 20:
             update_lead(lead["_row"], {"status": "NEEDS_DRAFT"})
             print(f"Empty/short body for {lead.get('business_name')} — marked NEEDS_DRAFT.")
             continue
+
         result = send_email(to, subject, body)
         if result == "SENT":
+            # Write ledger BEFORE status update — this is the authoritative
+            # record that the email left the server. A crash after this
+            # append but before the status update is SAFE: the next run
+            # checks the ledger (Guard 1) and skips this recipient.
+            biz_name = lead.get("business_name") or ""
+            _append_to_ledger(to, biz_name, subject)
             update_lead(lead["_row"], {"status": "SENT", "sent_at": datetime.now(timezone.utc).isoformat()})
             sent += 1
-            print(f"Sent to {to} ({lead.get('business_name')})")
-            time.sleep(2)  # gentle pacing for Gmail
+            print(f"Sent to {to} ({biz_name})")
+            time.sleep(2)  # gentle pacing for SMTP
         else:
             update_lead(lead["_row"], {"status": "SEND_ERROR"})
             print(f"Send failed for {to}: {result}")
@@ -1213,6 +1338,10 @@ def auto_approve_qualified() -> int:
             if consent != "IMPLIED_CONSPICUOUS" or not src.startswith("http"):
                 continue
             if is_blocked(email):
+                continue
+            # Skip if already in the immutable Sent Ledger (already sent,
+            # even if status got reset).
+            if _in_sent_ledger(email):
                 continue
             to_approve.append((i, email))
 
