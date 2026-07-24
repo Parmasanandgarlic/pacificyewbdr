@@ -33,7 +33,8 @@ jobs:
         env:
           APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          OPENROUTER_MODEL: ${{ secrets.OPENROUTER_MODEL }}
+          # OPENROUTER_MODEL intentionally omitted — code defaults to "openrouter/free"
+          # If you want to pin a model, add it to the .env file and re-upload ENV_FILE secret.
           GOOGLE_SHEET_NAME: ${{ secrets.GOOGLE_SHEET_NAME }}
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
           GOOGLE_SHEET_TAB: ${{ secrets.GOOGLE_SHEET_TAB }}
