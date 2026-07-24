@@ -21,6 +21,21 @@ _or_model: str = None
 _sheet = None
 _last_scraped_source_url: str = ""  # audit trail: URL where the last email was found
 
+# --- Global Sheets rate limiter (free tier: 60 req / 100 sec = 0.6 req/s) ---
+_last_sheets_api_call: float = 0.0
+_SHEETS_MIN_INTERVAL: float = 1.7  # ≈35 req/min, safe under free-tier quota
+
+
+def _sheets_throttle():
+    # Sleep if calling Sheets API too fast. Free GCP: 60 req / 100 sec.
+    # Pacing every call >=1.7s apart keeps us safely under the limit.
+    global _last_sheets_api_call
+    now = time.time()
+    elapsed = now - _last_sheets_api_call
+    if elapsed < _SHEETS_MIN_INTERVAL and _last_sheets_api_call > 0:
+        time.sleep(_SHEETS_MIN_INTERVAL - elapsed)
+    _last_sheets_api_call = time.time()
+
 # Default to a FREE OpenRouter model. Override with OPENROUTER_MODEL in .env.
 # openrouter/free auto-routes to the best available free endpoint, handles rate
 # limits gracefully, and always returns OpenAI-compatible response format.
@@ -457,6 +472,7 @@ def get_sheet():
 
 def get_leads(limit: int = 50):
     ws = get_sheet()
+    _sheets_throttle()
     vals = ws.get_all_values()
     if len(vals) < 2:
         return []
@@ -531,6 +547,7 @@ def _contacted_universe() -> dict:
     emails, websites, names = set(), set(), set()
     try:
         ws = get_sheet()
+        _sheets_throttle()
         vals = ws.get_all_values()
         if len(vals) >= 2:
             hdr = vals[0]
@@ -613,6 +630,7 @@ def insert_leads_batch(rows: list):
     if not rows:
         return 0
     ws = get_sheet()
+    _sheets_throttle()
     header = _reconcile_header(ws)  # current sheet header (may differ in order)
     now = datetime.now(timezone.utc).isoformat()
 
@@ -627,6 +645,7 @@ def insert_leads_batch(rows: list):
     # already exists in the live Sheet. This is what structurally prevents the
     # 2026-07-18 doubling (a discovered lead re-buffered as "new" because its
     # URL differed by scheme/www/trailing slash from the stored one).
+    _sheets_throttle()
     existing = ws.get_all_values()
     existing_data = existing[1:] if len(existing) > 1 else []
     existing_keys = set()
@@ -655,6 +674,7 @@ def insert_leads_batch(rows: list):
     # order. Corruption already present in existing cells is preserved byte-for-
     # byte here; the separate repair step is what cleans it. This function is
     # only about NOT INTRODUCING new shifts.
+    _sheets_throttle()
     existing = ws.get_all_values()
     existing_data = existing[1:] if len(existing) > 1 else []
     existing_dicts = []
@@ -667,6 +687,7 @@ def insert_leads_batch(rows: list):
     new_table = [list(HEADERS)] + new_table
 
     target = len(new_table)
+    _sheets_throttle()
     ws.update("A1", new_table, value_input_option="USER_ENTERED")
     # Verify what actually persisted (read back).
     persisted = 0
@@ -685,6 +706,7 @@ def insert_leads_batch(rows: list):
 
 def update_lead(row_id: int, fields: dict):
     ws = get_sheet()
+    _sheets_throttle()
     header = ws.row_values(1)
     # Build Cell objects for batch update to avoid 429 quota crashes.
     cells = []
@@ -695,6 +717,7 @@ def update_lead(row_id: int, fields: dict):
         # Retry once on 429 (Google Sheets write quota limit ~60/min).
         for attempt in range(2):
             try:
+                _sheets_throttle()
                 ws.update_cells(cells)
                 break
             except gspread.exceptions.APIError as e:
@@ -1011,6 +1034,7 @@ def _ensure_ledger():
         ws = sh.add_worksheet(title=LEDGER_TAB, rows=1000, cols=5)
         ws.append_row(["email", "business_name", "sent_at", "subject", "source"])
     # Ensure header exists
+    _sheets_throttle()
     if not ws.row_values(1):
         ws.append_row(["email", "business_name", "sent_at", "subject", "source"])
     return ws
@@ -1024,10 +1048,8 @@ def _load_ledger_emails() -> set:
         return _LEDGER_CACHE
     try:
         ws = _ensure_ledger()
+        _sheets_throttle()
         rows = ws.get_all_values()
-        if len(rows) < 2:
-            _LEDGER_CACHE = set()
-            return _LEDGER_CACHE
         hdr = rows[0]
         ecol = hdr.index("email") if "email" in hdr else None
         if ecol is None:
@@ -1055,6 +1077,7 @@ def _append_to_ledger(email: str, business_name: str, subject: str,
     """Append one row to the immutable Sent Ledger. Invalidates caches."""
     try:
         ws = _ensure_ledger()
+        _sheets_throttle()
         ws.append_row([
             email.strip().lower(),
             (business_name or "").strip(),
@@ -1318,6 +1341,7 @@ def auto_approve_qualified() -> int:
     approved = 0
     try:
         ws = get_sheet()
+        _sheets_throttle()
         vals = ws.get_all_values()
         if len(vals) < 2 or "email" not in vals[0]:
             return 0
@@ -1349,6 +1373,7 @@ def auto_approve_qualified() -> int:
             # Batch ALL status updates in ONE API call — avoids 429 quota crash.
             cells = [gspread.Cell(row=row, col=st_i + 1, value="APPROVED")
                      for row, _ in to_approve]
+            _sheets_throttle()
             ws.update_cells(cells)
             for row, email in to_approve:
                 approved += 1
@@ -1387,7 +1412,9 @@ def preflight_checks() -> bool:
         print(f"[PREFLIGHT] FAIL: IMAP auth (imap.zoho.com): {e}"); ok = False
     # 4) Sheet reachable + header intact
     try:
-        ws = get_sheet(); rows = ws.get_all_values()
+        ws = get_sheet()
+        _sheets_throttle()
+        rows = ws.get_all_values()
         if rows and rows[0] == HEADERS:
             print(f"[PREFLIGHT] Sheet OK ({len(rows)-1} data rows).")
         else:
