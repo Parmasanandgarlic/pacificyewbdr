@@ -1186,9 +1186,9 @@ def send_approved(limit: int = None) -> int:
 # Lower Mainland + Fraser Valley + Greater Vancouver coverage.
 CITIES = [
     "Vancouver", "Surrey", "Burnaby", "Richmond", "Coquitlam", "Langley",
-    "North Vancouver", "Abbotsford", "Chilliwack", "Maple Ridge", "Delta",
-    "White Rock", "Port Coquitlam", "New Westminster", "Pitt Meadows",
-    "Mission", "West Vancouver", "Port Moody", "Tsawwassen",
+    "North Vancouver", "Maple Ridge", "Delta", "White Rock",
+    "Port Coquitlam", "New Westminster", "Pitt Meadows",
+    "West Vancouver", "Port Moody", "Tsawwassen",
 ]
 # Service trades, clinics, and professional-services firms we can help.
 NICHES = [
