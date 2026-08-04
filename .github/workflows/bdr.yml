@@ -40,7 +40,7 @@ jobs:
 
       - name: Validate complete production worker
         run: |
-          python -m py_compile bdr_agent.py bdr_runner.py lead_intelligence.py growth_engine.py production_hardening.py
+          python -m py_compile bdr_agent.py bdr_runner.py lead_intelligence.py growth_engine.py production_hardening.py streaming_growth.py production_streaming.py
           python -m unittest discover -s tests -p 'test_*.py' -v
 
       - name: Write Google service-account JSON
@@ -49,12 +49,13 @@ jobs:
           echo "${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON_B64 }}" | base64 -d > creds/service_account.json
           python -c "import json; json.load(open('creds/service_account.json')); print('service_account.json is valid JSON')"
 
-      - name: Run hardened BDR production worker
+      - name: Run streaming BDR production worker
         env:
           APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
           APIFY_ACTOR: ${{ secrets.APIFY_ACTOR }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           OPENROUTER_MODEL: 'nvidia/nemotron-3-ultra-550b-a55b:free'
+          OPENROUTER_FALLBACK_MODEL: 'openrouter/free'
           GOOGLE_SHEET_NAME: ${{ secrets.GOOGLE_SHEET_NAME }}
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
           GOOGLE_SHEET_TAB: ${{ secrets.GOOGLE_SHEET_TAB }}
@@ -72,9 +73,12 @@ jobs:
           SEND_MIN_INTERVAL_SECONDS: '12'
           SEND_JITTER_SECONDS: '8'
           QUERIES_PER_RUN: '24'
+          MAX_QUERIES_PER_RUN: '72'
           RESULTS_PER_QUERY: '10'
-          DISCOVERY_BUDGET_SECONDS: '3000'
-          QUALIFIED_BUFFER_MULTIPLIER: '2'
+          DISCOVERY_BUDGET_SECONDS: '2700'
+          STREAM_BATCH_QUALIFIED: '2'
+          STREAM_BATCH_SIZE: '8'
+          STREAM_MAX_FLUSH_SECONDS: '240'
         shell: bash
         run: |
           set -euo pipefail
@@ -99,5 +103,5 @@ jobs:
           fi
 
           export BDR_RUN_SLOT="$run_slot"
-          echo "Starting Pacific Yew hardened BDR slot=$BDR_RUN_SLOT"
-          python production_hardening.py
+          echo "Starting Pacific Yew streaming BDR slot=$BDR_RUN_SLOT"
+          python production_streaming.py
