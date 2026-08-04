@@ -1,0 +1,83 @@
+name: Pacific Yew BDR v3 Manual Worker
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Governed v3 operation'
+        type: choice
+        required: true
+        default: pending-approvals
+        options:
+          - discover
+          - pending-approvals
+          - dispatch
+          - replies
+      query:
+        description: 'Discovery query; used only in discover mode'
+        required: false
+        default: 'small business Vancouver BC'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pacific-yew-bdr-v3
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      BDR_V3_ENABLED: 'true'
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      BDR_V3_MAILBOX_ID: ${{ secrets.BDR_V3_MAILBOX_ID }}
+      BDR_V3_CAMPAIGN_ID: ${{ secrets.BDR_V3_CAMPAIGN_ID }}
+      BDR_V3_DISPATCH_BATCH: '8'
+      BDR_V3_MINIMUM_SCORE: '55'
+      BDR_V3_MAXIMUM_RISK: '35'
+      BDR_TIMEZONE: 'America/Vancouver'
+      BDR_BOOKING_URL: ${{ secrets.BDR_BOOKING_URL }}
+      BDR_AUTO_CONFIRM_UNSUBSCRIBE: 'false'
+      BDR_AUTO_SEND_BOOKING_LINK: 'false'
+      APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+      APIFY_ACTOR: ${{ secrets.APIFY_ACTOR }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      GMAIL_USER: ${{ secrets.GMAIL_USER }}
+      GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+      SENDER_NAME: ${{ secrets.SENDER_NAME }}
+      SENDER_INDIVIDUAL: ${{ secrets.SENDER_INDIVIDUAL }}
+      SENDER_ADDRESS: ${{ secrets.SENDER_ADDRESS }}
+      SENDER_WEBSITE: ${{ secrets.SENDER_WEBSITE }}
+      SENDER_PHONE: ${{ secrets.SENDER_PHONE }}
+      INPUT_QUERY: ${{ inputs.query }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - run: pip install -r requirements-v3.txt
+      - name: Execute governed operation
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ inputs.mode }}" in
+            discover)
+              python v3_agent.py discover "$INPUT_QUERY"
+              ;;
+            pending-approvals)
+              python v3_agent.py pending-approvals --limit 100
+              ;;
+            dispatch)
+              python v3_agent.py dispatch --worker-id "github-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+              ;;
+            replies)
+              python v3_agent.py replies --limit 100
+              ;;
+            *)
+              echo "Unsupported mode" >&2
+              exit 2
+              ;;
+          esac
