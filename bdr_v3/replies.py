@@ -39,7 +39,13 @@ class ReplyProcessResult:
 
 
 class ReplyProcessor:
-    """Convert mailbox events into suppression, opportunity, and review actions."""
+    """Converts mailbox events into suppression, opportunity, and review actions.
+
+    Any human reply pauses the active sequence before another outbound touch can
+    be sent. Only narrow, explicitly enabled responses may be sent without human
+    review; commercial commitments, pricing, objections, and ambiguous replies
+    always escalate.
+    """
 
     def __init__(
         self,
@@ -79,10 +85,25 @@ class ReplyProcessor:
         account_id, contact_id, enrollment_id, route = contact_context
         analysis = classify_reply(reply.subject, reply.body_text, booking_url=self.policy.booking_url)
 
-        if enrollment_id is not None:
-            self.repository.pause_enrollment(enrollment_id, f"Inbound reply: {analysis.intent.value}")
+        reply_id, created = self.repository.record_reply(
+            reply, analysis, contact_id, enrollment_id
+        )
+        if not created:
+            self.repository.audit(
+                "duplicate_reply_ignored",
+                "reply",
+                reply_id,
+                {"provider_message_id": reply.provider_message_id},
+            )
+            return ReplyProcessResult(
+                reply_id, analysis, None, status="duplicate"
+            )
 
-        reply_id = self.repository.record_reply(reply, analysis, contact_id, enrollment_id)
+        if enrollment_id is not None:
+            self.repository.pause_enrollment(
+                enrollment_id, f"Inbound reply: {analysis.intent.value}"
+            )
+
         opportunity_id = None
         auto_response_id = ""
 
@@ -159,6 +180,7 @@ class ReplyProcessor:
             )
 
         elif analysis.intent == ReplyIntent.REFERRAL and analysis.referred_email:
+            # A referral is evidence to review, not blanket permission to contact.
             self.repository.audit(
                 "referral_received",
                 "reply",
