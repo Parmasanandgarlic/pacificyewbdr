@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from datetime import datetime, timezone
 from uuid import UUID
 
 from bdr_v3.adapters import (
@@ -16,8 +17,8 @@ from bdr_v3.adapters import (
 )
 from bdr_v3.delivery import AutonomyPolicy, GuardedDeliveryService
 from bdr_v3.orchestrator import BusinessDevelopmentEmployee, EmployeeConfig
-from bdr_v3.postgres_repository import PostgresRepository
 from bdr_v3.replies import ReplyPolicy, ReplyProcessor
+from bdr_v3.postgres_repository import PostgresRepository
 
 
 def _required_env(name: str) -> str:
@@ -27,12 +28,8 @@ def _required_env(name: str) -> str:
     return value
 
 
-def _v3_enabled() -> bool:
-    return (os.environ.get("BDR_V3_ENABLED") or "").lower() in {"1", "true", "yes"}
-
-
 def build_employee() -> tuple[BusinessDevelopmentEmployee, ZohoMailboxReader]:
-    if not _v3_enabled():
+    if (os.environ.get("BDR_V3_ENABLED") or "").lower() not in {"1", "true", "yes"}:
         raise RuntimeError("BDR_V3_ENABLED must be true before the v3 worker can run")
 
     database_url = _required_env("DATABASE_URL")
@@ -70,14 +67,8 @@ def build_employee() -> tuple[BusinessDevelopmentEmployee, ZohoMailboxReader]:
         repository,
         policy=ReplyPolicy(
             booking_url=(os.environ.get("BDR_BOOKING_URL") or "").strip(),
-            auto_confirm_unsubscribe=(
-                os.environ.get("BDR_AUTO_CONFIRM_UNSUBSCRIBE") or ""
-            ).lower()
-            == "true",
-            auto_send_booking_link=(
-                os.environ.get("BDR_AUTO_SEND_BOOKING_LINK") or ""
-            ).lower()
-            == "true",
+            auto_confirm_unsubscribe=(os.environ.get("BDR_AUTO_CONFIRM_UNSUBSCRIBE") or "").lower() == "true",
+            auto_send_booking_link=(os.environ.get("BDR_AUTO_SEND_BOOKING_LINK") or "").lower() == "true",
         ),
         responder=responder,
     )
@@ -92,12 +83,8 @@ def build_employee() -> tuple[BusinessDevelopmentEmployee, ZohoMailboxReader]:
             mailbox_id=mailbox_id,
             campaign_id=campaign_id,
             timezone=os.environ.get("BDR_TIMEZONE", "America/Vancouver"),
-            maximum_candidates_per_run=int(
-                os.environ.get("BDR_V3_MAX_CANDIDATES", "100")
-            ),
-            dispatch_batch_size=int(
-                os.environ.get("BDR_V3_DISPATCH_BATCH", "8")
-            ),
+            maximum_candidates_per_run=int(os.environ.get("BDR_V3_MAX_CANDIDATES", "100")),
+            dispatch_batch_size=int(os.environ.get("BDR_V3_DISPATCH_BATCH", "8")),
         ),
     )
     mailbox = ZohoMailboxReader(username=zoho_user, app_password=zoho_password)
@@ -105,74 +92,40 @@ def build_employee() -> tuple[BusinessDevelopmentEmployee, ZohoMailboxReader]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Pacific Yew BDR v3 governed employee"
-    )
+    parser = argparse.ArgumentParser(description="Pacific Yew BDR v3 governed employee")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    discover_parser = subparsers.add_parser(
-        "discover",
-        help="Discover, verify, research, score, route, and enroll accounts",
-    )
+    discover_parser = subparsers.add_parser("discover", help="Discover, verify, research, score, route, and enroll accounts")
     discover_parser.add_argument("query")
 
-    dispatch_parser = subparsers.add_parser(
-        "dispatch",
-        help="Claim and dispatch approved due touches",
-    )
+    dispatch_parser = subparsers.add_parser("dispatch", help="Claim and dispatch approved due touches")
     dispatch_parser.add_argument("--worker-id", default=f"manual-{os.getpid()}")
 
-    replies_parser = subparsers.add_parser(
-        "replies",
-        help="Process unread mailbox replies",
-    )
+    replies_parser = subparsers.add_parser("replies", help="Process unread mailbox replies")
     replies_parser.add_argument("--limit", type=int, default=50)
 
-    pending_parser = subparsers.add_parser(
-        "pending-approvals",
-        help="List touches waiting for human approval",
-    )
+    pending_parser = subparsers.add_parser("pending-approvals", help="List touches waiting for human approval")
     pending_parser.add_argument("--limit", type=int, default=50)
 
-    approve_parser = subparsers.add_parser(
-        "approve-touch",
-        help="Approve one scheduled touch after human review",
-    )
+    approve_parser = subparsers.add_parser("approve-touch", help="Approve one scheduled touch after human review")
     approve_parser.add_argument("touch_id")
-    approve_parser.add_argument(
-        "--approved-by",
-        default=os.environ.get("USER", "human"),
-    )
+    approve_parser.add_argument("--approved-by", default=os.environ.get("USER", "human"))
 
-    bootstrap_parser = subparsers.add_parser(
-        "bootstrap",
-        help="Create the initial mailbox and draft campaign records",
-    )
-    bootstrap_parser.add_argument(
-        "--mailbox-email",
-        default=os.environ.get("GMAIL_USER", "contact@pacificyew.pro"),
-    )
-    bootstrap_parser.add_argument(
-        "--campaign-name",
-        default="Pacific Yew Local SMB Outreach",
-    )
+    bootstrap_parser = subparsers.add_parser("bootstrap", help="Create the initial mailbox and draft campaign records")
+    bootstrap_parser.add_argument("--mailbox-email", default=os.environ.get("GMAIL_USER", "contact@pacificyew.pro"))
+    bootstrap_parser.add_argument("--campaign-name", default="Pacific Yew Local SMB Outreach")
     bootstrap_parser.add_argument("--daily-limit", type=int, default=8)
     bootstrap_parser.add_argument("--enable-mailbox", action="store_true")
 
-    all_parser = subparsers.add_parser(
-        "all",
-        help="Run discovery, replies, then approved dispatch",
-    )
+    all_parser = subparsers.add_parser("all", help="Run discovery, replies, then approved dispatch")
     all_parser.add_argument("query")
     all_parser.add_argument("--worker-id", default=f"manual-{os.getpid()}")
 
     args = parser.parse_args(argv)
     if args.command == "bootstrap":
-        if not _v3_enabled():
+        if (os.environ.get("BDR_V3_ENABLED") or "").lower() not in {"1", "true", "yes"}:
             raise RuntimeError("BDR_V3_ENABLED must be true before bootstrap")
-        repository = PostgresRepository.from_database_url(
-            _required_env("DATABASE_URL")
-        )
+        repository = PostgresRepository.from_database_url(_required_env("DATABASE_URL"))
         mailbox_id, campaign_id = repository.bootstrap_runtime(
             mailbox_email=args.mailbox_email,
             campaign_name=args.campaign_name,
@@ -189,9 +142,8 @@ def main(argv: list[str] | None = None) -> int:
         results = employee.discover_and_prepare(args.query)
         for result in results:
             print(
-                f"{result.status}: account={result.account_id} "
-                f"contact={result.contact_id} score={result.scorecard.total} "
-                f"risk={result.scorecard.risk} offer={result.route.offer.value} "
+                f"{result.status}: account={result.account_id} contact={result.contact_id} "
+                f"score={result.scorecard.total} risk={result.scorecard.risk} offer={result.route.offer.value} "
                 f"enrollment={result.enrollment_id}"
             )
         return 0
@@ -199,34 +151,27 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "dispatch":
         results = employee.dispatch_due(worker_id=args.worker_id)
         for result in results:
-            print(
-                f"{result.status.value}: touch={result.touch_id} "
-                f"reason={result.reason}"
-            )
-        return 0 if all(
-            result.status.value in {"sent", "cancelled"}
-            for result in results
-        ) else 2
+            print(f"{result.status.value}: touch={result.touch_id} reason={result.reason}")
+        return 0 if all(result.status.value in {"sent", "cancelled"} for result in results) else 2
 
     if args.command == "replies":
-        for reply in mailbox.unread(limit=args.limit):
+        replies = mailbox.unread(limit=args.limit)
+        for reply in replies:
             result = employee.process_reply(reply)
+            mailbox.mark_seen(reply.headers.get("imap_uid", ""))
             print(
-                f"reply={reply.provider_message_id} "
-                f"intent={result.analysis.intent.value} "
-                f"action={result.analysis.action.value} "
-                f"opportunity={result.opportunity_id}"
+                f"reply={reply.provider_message_id} intent={result.analysis.intent.value} "
+                f"action={result.analysis.action.value} opportunity={result.opportunity_id} "
+                f"status={result.status}"
             )
         return 0
 
     if args.command == "pending-approvals":
         for item in employee.repository.list_pending_approvals(args.limit):
             print(
-                f"touch={item['touch_id']} account={item['account_name']} "
-                f"contact={item['contact_email']} score={item['total_score']} "
-                f"risk={item['risk_score']} offer={item['recommended_offer']} "
-                f"step={item['step_position']} scheduled={item['scheduled_for']} "
-                f"subject={item['subject']}"
+                f"touch={item['touch_id']} account={item['account_name']} contact={item['contact_email']} "
+                f"score={item['total_score']} risk={item['risk_score']} offer={item['recommended_offer']} "
+                f"step={item['step_position']} scheduled={item['scheduled_for']} subject={item['subject']}"
             )
         return 0
 
@@ -239,6 +184,7 @@ def main(argv: list[str] | None = None) -> int:
         employee.discover_and_prepare(args.query)
         for reply in mailbox.unread(limit=50):
             employee.process_reply(reply)
+            mailbox.mark_seen(reply.headers.get("imap_uid", ""))
         employee.dispatch_due(worker_id=args.worker_id)
         return 0
 
@@ -249,8 +195,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except Exception as exc:
-        print(
-            f"BDR v3 failed: {exc.__class__.__name__}: {exc}",
-            file=sys.stderr,
-        )
+        print(f"BDR v3 failed: {exc.__class__.__name__}: {exc}", file=sys.stderr)
         raise

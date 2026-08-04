@@ -6,26 +6,10 @@ from uuid import uuid4
 
 from bdr_v3.delivery import GuardedDeliveryService
 from bdr_v3.memory_repository import MemoryRepository
-from bdr_v3.models import (
-    AccountCandidate,
-    InboundReply,
-    Offer,
-    OutcomeEvent,
-    ReplyIntent,
-    TouchStatus,
-)
+from bdr_v3.models import AccountCandidate, InboundReply, Offer, OutcomeEvent, ReplyIntent, TouchStatus
 from bdr_v3.orchestrator import BusinessDevelopmentEmployee, EmployeeConfig
 from bdr_v3.replies import ReplyPolicy, ReplyProcessor
-from v3_fixtures import (
-    FakeDiscovery,
-    FakeResearcher,
-    FakeResponder,
-    FakeSender,
-    FakeVerifier,
-    NOW,
-    UncertainSender,
-)
-
+from v3_fixtures import FakeDiscovery, FakeResearcher, FakeResponder, FakeSender, FakeVerifier, NOW, UncertainSender
 
 class OrchestrationTests(unittest.TestCase):
     def setUp(self):
@@ -36,10 +20,7 @@ class OrchestrationTests(unittest.TestCase):
         self.repository.add_campaign(self.campaign_id)
         self.sender = FakeSender()
         self.delivery = GuardedDeliveryService(self.repository, self.sender)
-        self.reply_processor = ReplyProcessor(
-            self.repository,
-            policy=ReplyPolicy(booking_url="https://cal.example"),
-        )
+        self.reply_processor = ReplyProcessor(self.repository, policy=ReplyPolicy(booking_url="https://cal.example"))
         self.employee = BusinessDevelopmentEmployee(
             repository=self.repository,
             discovery=FakeDiscovery(),
@@ -52,21 +33,14 @@ class OrchestrationTests(unittest.TestCase):
 
     def prepare(self):
         result = self.employee.process_candidate(
-            AccountCandidate(
-                "North Shore Clinic",
-                "https://northshore.example",
-                "https://search.example",
-            ),
+            AccountCandidate("North Shore Clinic", "https://northshore.example", "https://search.example"),
             start_at=NOW,
         )
         self.assertEqual(result.status, "enrolled")
         return result
 
     def first_touch(self):
-        return sorted(
-            self.repository.touches.values(),
-            key=lambda item: item.claimed.step_position,
-        )[0]
+        return sorted(self.repository.touches.values(), key=lambda item: item.claimed.step_position)[0]
 
     def test_full_prepare_loop_persists_score_route_and_sequence(self):
         result = self.prepare()
@@ -74,16 +48,12 @@ class OrchestrationTests(unittest.TestCase):
         self.assertIsNotNone(result.enrollment_id)
         self.assertEqual(result.route.offer, Offer.INTAKE_ROUTING)
         self.assertEqual(len(self.repository.touches), 4)
-        self.assertTrue(
-            all(t.claimed.requires_approval for t in self.repository.touches.values())
-        )
+        self.assertTrue(all(t.claimed.requires_approval for t in self.repository.touches.values()))
 
     def test_unapproved_touch_is_not_claimed_or_sent(self):
         self.prepare()
         claimed = self.repository.claim_due_touches(
-            worker_id="worker",
-            limit=1,
-            now=datetime(2026, 8, 20, tzinfo=timezone.utc),
+            worker_id="worker", limit=1, now=datetime(2026, 8, 20, tzinfo=timezone.utc)
         )
         self.assertEqual(claimed, [])
         self.assertEqual(self.sender.sent, [])
@@ -92,11 +62,7 @@ class OrchestrationTests(unittest.TestCase):
         self.prepare()
         touch = self.first_touch()
         self.repository.approve_touch(touch.claimed.touch_id, "michael")
-        self.repository.claim_due_touches(
-            worker_id="worker",
-            limit=1,
-            now=datetime(2026, 8, 20, tzinfo=timezone.utc),
-        )
+        self.repository.claim_due_touches(worker_id="worker", limit=1, now=datetime(2026, 8, 20, tzinfo=timezone.utc))
         result = self.delivery.dispatch_touch(touch.claimed.touch_id)
         self.assertEqual(result.status, TouchStatus.SENT)
         self.assertEqual(len(self.sender.sent), 1)
@@ -105,15 +71,11 @@ class OrchestrationTests(unittest.TestCase):
         self.assertEqual(len(self.sender.sent), 1)
 
     def test_suppression_blocks_delivery(self):
-        self.prepare()
+        prepared = self.prepare()
         touch = self.first_touch()
         self.repository.approve_touch(touch.claimed.touch_id, "michael")
         self.repository.suppress("owner@northshore.example", "unsubscribe", "test")
-        self.repository.claim_due_touches(
-            worker_id="worker",
-            limit=1,
-            now=datetime(2026, 8, 20, tzinfo=timezone.utc),
-        )
+        self.repository.claim_due_touches(worker_id="worker", limit=1, now=datetime(2026, 8, 20, tzinfo=timezone.utc))
         result = self.delivery.dispatch_touch(touch.claimed.touch_id)
         self.assertEqual(result.status, TouchStatus.FAILED)
         self.assertIn("suppressed", result.reason.lower())
@@ -122,18 +84,11 @@ class OrchestrationTests(unittest.TestCase):
         self.prepare()
         touch = self.first_touch()
         self.repository.approve_touch(touch.claimed.touch_id, "michael")
-        self.repository.claim_due_touches(
-            worker_id="worker",
-            limit=1,
-            now=datetime(2026, 8, 20, tzinfo=timezone.utc),
-        )
+        self.repository.claim_due_touches(worker_id="worker", limit=1, now=datetime(2026, 8, 20, tzinfo=timezone.utc))
         service = GuardedDeliveryService(self.repository, UncertainSender())
         result = service.dispatch_touch(touch.claimed.touch_id)
         self.assertEqual(result.status, TouchStatus.UNCERTAIN)
-        self.assertEqual(
-            self.repository.touches[touch.claimed.touch_id].status,
-            TouchStatus.UNCERTAIN,
-        )
+        self.assertEqual(self.repository.touches[touch.claimed.touch_id].status, TouchStatus.UNCERTAIN)
 
     def test_positive_reply_pauses_sequence_and_creates_opportunity(self):
         prepared = self.prepare()
@@ -148,10 +103,7 @@ class OrchestrationTests(unittest.TestCase):
         result = self.employee.process_reply(reply)
         self.assertEqual(result.analysis.intent, ReplyIntent.POSITIVE_INTEREST)
         self.assertIsNotNone(result.opportunity_id)
-        self.assertEqual(
-            self.repository.enrollments[prepared.enrollment_id].status.value,
-            "paused",
-        )
+        self.assertEqual(self.repository.enrollments[prepared.enrollment_id].status.value, "paused")
 
     def test_unsubscribe_suppresses_and_stops_sequence(self):
         prepared = self.prepare()
@@ -166,20 +118,14 @@ class OrchestrationTests(unittest.TestCase):
         result = self.employee.process_reply(reply)
         self.assertEqual(result.analysis.intent, ReplyIntent.UNSUBSCRIBE)
         self.assertIn("owner@northshore.example", self.repository.suppressions)
-        self.assertEqual(
-            self.repository.enrollments[prepared.enrollment_id].status.value,
-            "stopped",
-        )
+        self.assertEqual(self.repository.enrollments[prepared.enrollment_id].status.value, "stopped")
 
     def test_meeting_link_auto_send_requires_explicit_policy(self):
         self.prepare()
         responder = FakeResponder()
         processor = ReplyProcessor(
             self.repository,
-            policy=ReplyPolicy(
-                booking_url="https://cal.example",
-                auto_send_booking_link=True,
-            ),
+            policy=ReplyPolicy(booking_url="https://cal.example", auto_send_booking_link=True),
             responder=responder,
         )
         result = processor.process(
@@ -210,6 +156,55 @@ class OrchestrationTests(unittest.TestCase):
         self.assertEqual(result.status, "unmatched")
         self.assertEqual(len(self.repository.opportunities), 0)
 
+
+    def test_draft_campaign_cannot_claim_or_send(self):
+        self.prepare()
+        self.repository.campaigns[self.campaign_id]["status"] = "draft"
+        touch = self.first_touch()
+        self.repository.approve_touch(touch.claimed.touch_id, "michael")
+        claimed = self.repository.claim_due_touches(
+            worker_id="worker",
+            limit=1,
+            now=datetime(2026, 8, 20, tzinfo=timezone.utc),
+        )
+        self.assertEqual(claimed, [])
+        self.assertEqual(self.sender.sent, [])
+
+    def test_unhealthy_mailbox_defers_claimed_touch_without_failure(self):
+        self.prepare()
+        self.repository.mailboxes[self.mailbox_id]["health_status"] = "unknown"
+        touch = self.first_touch()
+        self.repository.approve_touch(touch.claimed.touch_id, "michael")
+        self.repository.claim_due_touches(
+            worker_id="worker",
+            limit=1,
+            now=datetime(2026, 8, 20, tzinfo=timezone.utc),
+        )
+        result = self.delivery.dispatch_touch(touch.claimed.touch_id)
+        self.assertEqual(result.status, TouchStatus.SCHEDULED)
+        self.assertEqual(
+            self.repository.touches[touch.claimed.touch_id].status,
+            TouchStatus.SCHEDULED,
+        )
+        self.assertEqual(self.sender.sent, [])
+
+    def test_duplicate_reply_is_idempotent(self):
+        self.prepare()
+        reply = InboundReply(
+            sender_email="owner@northshore.example",
+            recipient_email="contact@pacificyew.pro",
+            subject="Re: workflow idea",
+            body_text="Interested. Please send the outline.",
+            provider_message_id="reply-idempotent",
+            received_at=NOW,
+        )
+        first = self.employee.process_reply(reply)
+        second = self.employee.process_reply(reply)
+        self.assertEqual(first.analysis.intent, ReplyIntent.POSITIVE_INTEREST)
+        self.assertEqual(second.status, "duplicate")
+        self.assertEqual(len(self.repository.opportunities), 1)
+        self.assertEqual(len(self.repository.replies), 1)
+
     def test_outcome_learning_is_auditable(self):
         prepared = self.prepare()
         event = OutcomeEvent(
@@ -222,12 +217,7 @@ class OrchestrationTests(unittest.TestCase):
         )
         self.employee.learn_from_outcome(event)
         self.assertEqual(self.repository.outcomes, [event])
-        self.assertTrue(
-            any(
-                item["event_type"] == "outcome_recorded"
-                for item in self.repository.audit_events
-            )
-        )
+        self.assertTrue(any(item["event_type"] == "outcome_recorded" for item in self.repository.audit_events))
 
 
 if __name__ == "__main__":

@@ -33,9 +33,11 @@ begin
         from bdr_touches t
         join bdr_enrollments e on e.id = t.enrollment_id
         join bdr_sequence_steps s on s.id = t.sequence_step_id
+        join bdr_campaigns campaign on campaign.id = e.campaign_id
         where t.status = 'scheduled'
           and t.scheduled_for <= p_now
           and e.status = 'active'
+          and campaign.status = 'active'
           and (not s.requires_approval or t.approved_at is not null)
         order by t.scheduled_for, t.created_at
         for update of t skip locked
@@ -102,6 +104,7 @@ returns table (
     mailbox_enabled boolean,
     mailbox_daily_limit integer,
     mailbox_sent_today bigint,
+    campaign_active boolean,
     conflicting_active_enrollment boolean
 )
 language sql
@@ -139,7 +142,7 @@ as $$
         a.eligible,
         a.score_reasons,
         exists(select 1 from bdr_suppressions x where lower(x.email) = lower(c.email)),
-        m.enabled and m.health_status not in ('blocked','failed'),
+        m.enabled and m.health_status = 'healthy',
         m.daily_limit,
         (
             select count(*)
@@ -148,6 +151,7 @@ as $$
               and sent.status = 'sent'
               and sent.accepted_at >= date_trunc('day', now() at time zone 'UTC') at time zone 'UTC'
         ),
+        campaign.status = 'active',
         exists(
             select 1
             from bdr_enrollments other
@@ -159,6 +163,7 @@ as $$
     join bdr_enrollments e on e.id = t.enrollment_id
     join bdr_sequence_steps s on s.id = t.sequence_step_id
     join bdr_accounts a on a.id = e.account_id
+    join bdr_campaigns campaign on campaign.id = e.campaign_id
     join bdr_contacts c on c.id = e.contact_id
     join bdr_mailboxes m on m.id = e.mailbox_id
     where t.id = p_touch_id;

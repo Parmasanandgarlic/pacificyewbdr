@@ -32,7 +32,7 @@ The legacy Google Sheets worker is not removed by this pull request. V3 is delib
 ### Transactional operating layer
 
 - `bdr_v3/repository.py`: repository protocol. `memory_repository.py` provides deterministic test storage; the `postgres_*` modules provide the transactional Supabase implementation.
-- `migrations/001_bdr_v3_schema.sql`, `002_bdr_v3_claims.sql`, and `003_bdr_v3_delivery.sql`: accounts, contacts, evidence, mailboxes, campaigns, sequence steps, enrollments, touches, messages, suppressions, replies, opportunities, outcomes, audit events, and transactional functions.
+- `migrations/001_bdr_v3_schema.sql, 002_bdr_v3_claims.sql, and 003_bdr_v3_delivery.sql`: accounts, contacts, evidence, mailboxes, campaigns, sequence steps, enrollments, touches, messages, suppressions, replies, opportunities, outcomes, audit events, and transactional functions.
 - `bdr_v3/delivery.py`: the only v3 route to a mail provider. It rechecks approval, consent evidence, suppression, business-email status, score, risk, mailbox state, daily quota, campaign conflict, and idempotency.
 - `bdr_v3/replies.py`: pauses sequences on human replies, processes unsubscribes and bounces, creates opportunities, and restricts automatic replies to explicit policy flags.
 
@@ -56,6 +56,10 @@ The legacy Google Sheets worker is not removed by this pull request. V3 is delib
 9. **Referral addresses are not automatically contacted.** They require a new consent and relevance review.
 10. **Scraped website text is untrusted input.** Instruction-like content is neutralized, delimited, and prevented from controlling delivery tools.
 11. **Supabase client roles cannot invoke the SECURITY DEFINER worker functions.** Execute permission is reserved for `service_role`.
+12. **Draft or paused campaigns cannot be claimed.** Dispatch also rechecks campaign state immediately before reservation.
+13. **Mailbox readiness is explicit.** A mailbox must be enabled and report `healthy`; `unknown` is not treated as sendable.
+14. **Reply ingestion is idempotent.** IMAP messages are peeked, processed by provider message ID, and marked seen only after durable processing succeeds.
+15. **SMTP messages have stable identities.** Every outbound message carries a deterministic `Message-ID` and idempotency header; disconnects after submission begins become `uncertain` and require Sent-folder reconciliation.
 
 ## Package routing
 
