@@ -27,15 +27,15 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: python -m pip install --upgrade pip && pip install -r requirements.txt
 
-      - name: Validate production growth engine
+      - name: Validate complete production worker
         run: |
-          python -m py_compile bdr_agent.py bdr_runner.py lead_intelligence.py growth_engine.py
-          python -m unittest discover -s tests -p 'test_lead_intelligence.py' -v
-          python -m unittest discover -s tests -p 'test_growth_engine.py' -v
+          python -m py_compile bdr_agent.py bdr_runner.py lead_intelligence.py growth_engine.py production_hardening.py
+          python -m unittest discover -s tests -p 'test_*.py' -v
 
       - name: Write Google service-account JSON
         run: |
@@ -43,7 +43,7 @@ jobs:
           echo "${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON_B64 }}" | base64 -d > creds/service_account.json
           python -c "import json; json.load(open('creds/service_account.json')); print('service_account.json is valid JSON')"
 
-      - name: Run manual BDR growth catch-up
+      - name: Run hardened manual BDR catch-up
         env:
           APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
           APIFY_ACTOR: ${{ secrets.APIFY_ACTOR }}
@@ -61,10 +61,13 @@ jobs:
           SENDER_WEBSITE: ${{ secrets.SENDER_WEBSITE }}
           SENDER_PHONE: ${{ secrets.SENDER_PHONE }}
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          SEND_LIMIT: '8'
+          SEND_LIMIT: '12'
+          DAILY_SEND_CAP: '48'
+          SEND_MIN_INTERVAL_SECONDS: '12'
+          SEND_JITTER_SECONDS: '8'
           QUERIES_PER_RUN: '24'
           RESULTS_PER_QUERY: '10'
           DISCOVERY_BUDGET_SECONDS: '3000'
           QUALIFIED_BUFFER_MULTIPLIER: '2'
           BDR_RUN_SLOT: 'manual'
-        run: python growth_engine.py
+        run: python production_hardening.py
