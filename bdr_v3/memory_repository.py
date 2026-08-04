@@ -7,28 +7,20 @@ from typing import Any, Mapping, Sequence
 from uuid import UUID, uuid4
 
 from .models import (
-    ClaimedTouch,
-    Contact,
-    DispatchContext,
-    EnrollmentStatus,
-    Evidence,
-    InboundReply,
-    Opportunity,
-    OutcomeEvent,
-    ProviderReceipt,
-    ReplyAnalysis,
-    RouteDecision,
-    Scorecard,
-    SequencePlan,
-    TouchStatus,
-    VerifiedAccount,
+    ClaimedTouch, Contact, DispatchContext, EnrollmentStatus, Evidence, InboundReply,
+    Opportunity, OutcomeEvent, ProviderReceipt, ReplyAnalysis, RouteDecision, Scorecard,
+    SequencePlan, TouchStatus, VerifiedAccount,
 )
 from .policies import make_idempotency_key, next_business_send_time, normalize_email
 from .repository import AccountRecord, BdrRepository, ContactRecord, EnrollmentRecord, TouchRecord
 
-
 class MemoryRepository(BdrRepository):
-    """Deterministic repository used by tests and local dry-runs."""
+    """Deterministic repository used by tests and local dry-runs.
+
+    It mirrors the invariants of the Postgres repository: unique domains,
+    unique normalized contact emails, idempotent messages, claim ownership,
+    suppression, and one active enrollment per contact/campaign.
+    """
 
     def __init__(self) -> None:
         self.accounts: dict[UUID, AccountRecord] = {}
@@ -42,17 +34,24 @@ class MemoryRepository(BdrRepository):
         self.message_by_idempotency: dict[str, UUID] = {}
         self.suppressions: dict[str, dict[str, str]] = {}
         self.replies: dict[UUID, dict[str, Any]] = {}
+        self.reply_by_provider_id: dict[str, UUID] = {}
         self.opportunities: dict[UUID, Opportunity] = {}
         self.audit_events: list[dict[str, Any]] = []
         self.outcomes: list[OutcomeEvent] = []
         self.mailboxes: dict[UUID, dict[str, Any]] = {}
         self.campaigns: dict[UUID, dict[str, Any]] = {}
 
-    def add_mailbox(self, mailbox_id: UUID, *, enabled: bool = True, daily_limit: int = 24) -> None:
-        self.mailboxes[mailbox_id] = {"enabled": enabled, "daily_limit": daily_limit}
+    def add_mailbox(
+        self, mailbox_id: UUID, *, enabled: bool = True, daily_limit: int = 24, health_status: str = "healthy"
+    ) -> None:
+        self.mailboxes[mailbox_id] = {
+            "enabled": enabled, "daily_limit": daily_limit, "health_status": health_status
+        }
 
-    def add_campaign(self, campaign_id: UUID, *, name: str = "Default") -> None:
-        self.campaigns[campaign_id] = {"name": name}
+    def add_campaign(
+        self, campaign_id: UUID, *, name: str = "Default", status: str = "active"
+    ) -> None:
+        self.campaigns[campaign_id] = {"name": name, "status": status}
 
     def upsert_account(self, account: VerifiedAccount) -> UUID:
         account_id = self.account_by_domain.get(account.domain)
@@ -158,6 +157,7 @@ class MemoryRepository(BdrRepository):
                 and record.scheduled_for <= now
                 and (not record.claimed.requires_approval or record.claimed.approved_at is not None)
                 and self.enrollments[record.claimed.enrollment_id].status == EnrollmentStatus.ACTIVE
+                and self.campaigns.get(record.claimed.campaign_id, {}).get("status") == "active"
             ),
             key=lambda item: (item.scheduled_for, item.claimed.step_position),
         )[:limit]
@@ -177,7 +177,10 @@ class MemoryRepository(BdrRepository):
         touch = touch_record.claimed
         account = self.accounts[touch.account_id]
         contact = self.contacts[touch.contact_id].contact
-        mailbox = self.mailboxes.get(touch.mailbox_id, {"enabled": False, "daily_limit": 0})
+        mailbox = self.mailboxes.get(
+            touch.mailbox_id, {"enabled": False, "daily_limit": 0, "health_status": "unknown"}
+        )
+        campaign = self.campaigns.get(touch.campaign_id, {"status": "draft"})
         today = datetime.now(timezone.utc).date()
         sent_today = sum(
             1
@@ -206,9 +209,12 @@ class MemoryRepository(BdrRepository):
             verified_business_email=contact.verified_business_email,
             scorecard=account.scorecard,
             suppressed=normalize_email(contact.email) in self.suppressions,
-            mailbox_enabled=bool(mailbox["enabled"]),
+            mailbox_enabled=(
+                bool(mailbox["enabled"]) and mailbox.get("health_status") == "healthy"
+            ),
             mailbox_daily_limit=int(mailbox["daily_limit"]),
             mailbox_sent_today=sent_today,
+            campaign_active=campaign.get("status") == "active",
             conflicting_active_enrollment=conflicting,
         )
 
@@ -286,15 +292,19 @@ class MemoryRepository(BdrRepository):
         analysis: ReplyAnalysis,
         contact_id: UUID,
         enrollment_id: UUID | None,
-    ) -> UUID:
+    ) -> tuple[UUID, bool]:
+        existing = self.reply_by_provider_id.get(reply.provider_message_id)
+        if existing is not None:
+            return existing, False
         reply_id = uuid4()
+        self.reply_by_provider_id[reply.provider_message_id] = reply_id
         self.replies[reply_id] = {
             "reply": reply,
             "analysis": analysis,
             "contact_id": contact_id,
             "enrollment_id": enrollment_id,
         }
-        return reply_id
+        return reply_id, True
 
     def create_opportunity(self, opportunity: Opportunity) -> UUID:
         opportunity_id = uuid4()
@@ -349,3 +359,5 @@ class MemoryRepository(BdrRepository):
                 "campaign_id": str(event.campaign_id) if event.campaign_id else None,
             },
         )
+
+
