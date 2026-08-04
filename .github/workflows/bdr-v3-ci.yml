@@ -52,6 +52,11 @@ jobs:
           base64 --decode /tmp/bdr-v3-hardening.b64 > /tmp/bdr-v3-hardening.tar.gz
           echo '630ea4e2cefb9b3f4c0c13ad5881306770414d9672154073781e8a7e1afa5d25  /tmp/bdr-v3-hardening.tar.gz' | sha256sum -c -
           tar -xzf /tmp/bdr-v3-hardening.tar.gz
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('migrations/002_bdr_v3_claims.sql')
+          path.write_text(path.read_text(encoding='utf-8').rstrip() + '\n', encoding='utf-8')
+          PY
           rm -f .v3bundle.* .v3-final-hardening.tar.gz.b64 .v3-hardening.part*
           rm -f .github/workflows/apply-v3-final-hardening.yml
           cat > .github/workflows/bdr-v3-ci.yml <<'CLEAN_WORKFLOW'
@@ -109,6 +114,6 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A
           git diff --cached --check
-          test -z "$(git diff --cached --name-only | grep -E '^\.v3(bundle|hardening)|^\.github/workflows/apply-v3-final-hardening\.yml$' || true)"
+          test -z "$(git diff --cached --diff-filter=AM --name-only | grep -E '^\.v3(bundle|hardening)|^\.github/workflows/apply-v3-final-hardening\.yml$' || true)"
           git commit -m 'fix(v3): harden campaign, reply, evidence, and SMTP invariants'
           git push origin HEAD:${{ github.head_ref }}
