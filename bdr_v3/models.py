@@ -207,6 +207,7 @@ class DispatchContext:
     mailbox_enabled: bool
     mailbox_daily_limit: int
     mailbox_sent_today: int
+    campaign_active: bool
     conflicting_active_enrollment: bool
 
 
