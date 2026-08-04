@@ -3,12 +3,16 @@ from __future__ import annotations
 import os
 
 import bdr_agent as legacy
+import email_copy_intelligence
+import outreach_compliance
 import production_hardening as hardening
 import streaming_growth
 
 
 def main() -> None:
     hardening.install()
+    email_copy_intelligence.install()
+    outreach_compliance.install()
     requested = max(1, int(os.environ.get("SEND_LIMIT", str(legacy.SEND_LIMIT))))
     effective = hardening.effective_send_limit(requested)
     if effective <= 0:

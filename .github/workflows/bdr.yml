@@ -2,14 +2,14 @@ name: Pacific Yew BDR Agent
 
 on:
   schedule:
-    # Each Pacific local-time window has a PDT and PST candidate. The runtime
-    # guard permits only the occurrence matching America/Vancouver local time.
-    - cron: '0 10 * * 1-5' # 3am PDT candidate
-    - cron: '0 11 * * 1-5' # 3am PST candidate
+    # Four weekday Pacific-time delivery windows. Each has a PDT and PST
+    # candidate; the runtime guard permits only the matching local occurrence.
     - cron: '0 15 * * 1-5' # 8am PDT candidate
     - cron: '0 16 * * 1-5' # 8am PST candidate
-    - cron: '0 18 * * 1-5' # 11am PDT candidate
-    - cron: '0 19 * * 1-5' # 11am PST candidate
+    - cron: '0 17 * * 1-5' # 10am PDT candidate
+    - cron: '0 18 * * 1-5' # 10am PST candidate
+    - cron: '0 19 * * 1-5' # 12pm PDT candidate
+    - cron: '0 20 * * 1-5' # 12pm PST candidate
     - cron: '0 21 * * 1-5' # 2pm PDT candidate
     - cron: '0 22 * * 1-5' # 2pm PST candidate
   workflow_dispatch:
@@ -40,7 +40,7 @@ jobs:
 
       - name: Validate complete production worker
         run: |
-          python -m py_compile bdr_agent.py bdr_runner.py lead_intelligence.py growth_engine.py production_hardening.py streaming_growth.py production_streaming.py
+          python -m py_compile bdr_agent.py bdr_runner.py lead_intelligence.py growth_engine.py production_hardening.py streaming_growth.py email_copy_intelligence.py outreach_compliance.py production_streaming.py
           python -m unittest discover -s tests -p 'test_*.py' -v
 
       - name: Write Google service-account JSON
@@ -49,7 +49,7 @@ jobs:
           echo "${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON_B64 }}" | base64 -d > creds/service_account.json
           python -c "import json; json.load(open('creds/service_account.json')); print('service_account.json is valid JSON')"
 
-      - name: Run streaming BDR production worker
+      - name: Run compliant streaming BDR worker
         env:
           APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
           APIFY_ACTOR: ${{ secrets.APIFY_ACTOR }}
@@ -68,10 +68,13 @@ jobs:
           SENDER_WEBSITE: ${{ secrets.SENDER_WEBSITE }}
           SENDER_PHONE: ${{ secrets.SENDER_PHONE }}
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          SEND_LIMIT: '12'
-          DAILY_SEND_CAP: '48'
-          SEND_MIN_INTERVAL_SECONDS: '12'
-          SEND_JITTER_SECONDS: '8'
+          SEND_LIMIT: '5'
+          DAILY_SEND_CAP: '20'
+          INITIAL_OUTREACH_ONLY: 'true'
+          ALLOW_MANUAL_DELIVERY: 'false'
+          ONE_TOUCH_LEDGER_TAB: 'One Touch Ledger'
+          SEND_MIN_INTERVAL_SECONDS: '18'
+          SEND_JITTER_SECONDS: '12'
           QUERIES_PER_RUN: '24'
           MAX_QUERIES_PER_RUN: '72'
           RESULTS_PER_QUERY: '10'
@@ -88,9 +91,9 @@ jobs:
           run_slot='manual'
 
           case "$event_schedule" in
-            '0 10 * * 1-5'|'0 11 * * 1-5') expected_time='03:00'; run_slot='overnight' ;;
             '0 15 * * 1-5'|'0 16 * * 1-5') expected_time='08:00'; run_slot='morning' ;;
-            '0 18 * * 1-5'|'0 19 * * 1-5') expected_time='11:00'; run_slot='midday' ;;
+            '0 17 * * 1-5'|'0 18 * * 1-5') expected_time='10:00'; run_slot='late_morning' ;;
+            '0 19 * * 1-5'|'0 20 * * 1-5') expected_time='12:00'; run_slot='midday' ;;
             '0 21 * * 1-5'|'0 22 * * 1-5') expected_time='14:00'; run_slot='afternoon' ;;
           esac
 
@@ -103,5 +106,5 @@ jobs:
           fi
 
           export BDR_RUN_SLOT="$run_slot"
-          echo "Starting Pacific Yew streaming BDR slot=$BDR_RUN_SLOT"
+          echo "Starting Pacific Yew compliant BDR slot=$BDR_RUN_SLOT"
           python production_streaming.py
