@@ -8,9 +8,9 @@ on:
       - 'lead_intelligence.py'
       - 'growth_engine.py'
       - 'production_hardening.py'
-      - 'tests/test_lead_intelligence.py'
-      - 'tests/test_growth_engine.py'
-      - 'tests/test_production_hardening.py'
+      - 'streaming_growth.py'
+      - 'production_streaming.py'
+      - 'tests/test_*.py'
       - '.github/workflows/bdr.yml'
       - '.github/workflows/bdr-immediate-kickstart.yml'
       - '.github/workflows/bdr-production-ci.yml'
@@ -22,7 +22,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -33,7 +33,6 @@ jobs:
         run: python -m pip install --upgrade pip && pip install -r requirements.txt
       - name: Compile every production module
         run: |
-          python -m py_compile bdr_agent.py bdr_runner.py lead_intelligence.py growth_engine.py
-          if [[ -f production_hardening.py ]]; then python -m py_compile production_hardening.py; fi
+          python -m py_compile bdr_agent.py bdr_runner.py lead_intelligence.py growth_engine.py production_hardening.py streaming_growth.py production_streaming.py
       - name: Run all production unit tests
         run: python -m unittest discover -s tests -p 'test_*.py' -v
