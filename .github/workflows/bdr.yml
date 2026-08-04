@@ -1,16 +1,11 @@
 name: Pacific Yew BDR Agent
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - '.github/workflows/bdr.yml'
   schedule:
-    # DST-aware 2:30am Pacific run. Both UTC slots are scheduled; the runtime
-    # guard below permits only the one that is actually 02:30 in Vancouver.
-    - cron: '30 9 * * 1-5'
-    - cron: '30 10 * * 1-5'
+    # DST-aware 3:00am Pacific run. Both UTC slots are scheduled; the runtime
+    # guard below permits only the one that is actually 03:00 in Vancouver.
+    - cron: '0 10 * * 1-5'
+    - cron: '0 11 * * 1-5'
     # Existing daytime windows. GitHub cron is UTC; these are 8am, 11am,
     # and 2pm while British Columbia is on daylight time.
     - cron: '0 15 * * 1-5'
@@ -81,9 +76,9 @@ jobs:
           event_name='${{ github.event_name }}'
           event_schedule='${{ github.event.schedule }}'
           if [[ "$event_name" == "schedule" && \
-                ( "$event_schedule" == "30 9 * * 1-5" || "$event_schedule" == "30 10 * * 1-5" ) ]]; then
+                ( "$event_schedule" == "0 10 * * 1-5" || "$event_schedule" == "0 11 * * 1-5" ) ]]; then
             local_time="$(TZ=America/Vancouver date +%H:%M)"
-            if [[ "$local_time" != "02:30" ]]; then
+            if [[ "$local_time" != "03:00" ]]; then
               echo "Skipping duplicate DST slot; Vancouver local time is $local_time."
               exit 0
             fi
