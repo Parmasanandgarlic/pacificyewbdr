@@ -25,8 +25,7 @@ class PostgresPipelineMixin:
                 """
                 insert into bdr_suppressions(email,reason,source)
                 values (%s,%s,%s)
-                on conflict ((lower(email))) do update set
-                    reason=excluded.reason,source=excluded.source,updated_at=now()
+                on conflict ((lower(email))) do update set reason=excluded.reason,source=excluded.source,updated_at=now()
                 """,
                 (normalize_email(email), reason, source),
             )
@@ -37,7 +36,7 @@ class PostgresPipelineMixin:
         analysis: ReplyAnalysis,
         contact_id: UUID,
         enrollment_id: UUID | None,
-    ) -> UUID:
+    ) -> tuple[UUID, bool]:
         with self._connection() as conn, conn.cursor() as cur:
             cur.execute(
                 """
@@ -45,27 +44,27 @@ class PostgresPipelineMixin:
                     (contact_id,enrollment_id,sender_email,recipient_email,subject,body_text,
                      provider_message_id,received_at,intent,confidence,summary,action,headers)
                 values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
-                on conflict (provider_message_id) do update set
-                    intent=excluded.intent,summary=excluded.summary
+                on conflict (provider_message_id) do nothing
                 returning id
                 """,
                 (
-                    contact_id,
-                    enrollment_id,
-                    reply.sender_email,
-                    reply.recipient_email,
-                    reply.subject,
-                    reply.body_text,
-                    reply.provider_message_id,
-                    reply.received_at,
-                    analysis.intent.value,
-                    analysis.confidence,
-                    analysis.summary,
-                    analysis.action.value,
-                    self._json(dict(reply.headers)),
+                    contact_id, enrollment_id, reply.sender_email, reply.recipient_email,
+                    reply.subject, reply.body_text, reply.provider_message_id, reply.received_at,
+                    analysis.intent.value, analysis.confidence, analysis.summary,
+                    analysis.action.value, self._json(dict(reply.headers)),
                 ),
             )
-            return cur.fetchone()[0]
+            row = cur.fetchone()
+            if row is not None:
+                return row[0], True
+            cur.execute(
+                "select id from bdr_replies where provider_message_id=%s",
+                (reply.provider_message_id,),
+            )
+            existing = cur.fetchone()
+            if existing is None:
+                raise RuntimeError("Reply idempotency conflict could not be resolved")
+            return existing[0], False
 
     def create_opportunity(self, opportunity: Opportunity) -> UUID:
         with self._connection() as conn, conn.cursor() as cur:
@@ -90,8 +89,7 @@ class PostgresPipelineMixin:
             return cur.fetchone()[0]
 
     def get_contact_context_by_email(
-        self,
-        email: str,
+        self, email: str
     ) -> tuple[UUID, UUID, UUID | None, RouteDecision | None] | None:
         with self._connection() as conn, conn.cursor() as cur:
             cur.execute(
