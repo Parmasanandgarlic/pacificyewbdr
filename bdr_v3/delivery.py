@@ -146,6 +146,8 @@ class GuardedDeliveryService:
             return "Mailbox is disabled or unhealthy.", True
         if context.mailbox_sent_today >= context.mailbox_daily_limit:
             return "Mailbox daily limit has been reached.", True
+        if not context.campaign_active:
+            return "Campaign is not active.", True
         if context.conflicting_active_enrollment:
             return "Another active campaign already targets this contact.", False
         if not is_business_email(context.contact_email) or not context.verified_business_email:
