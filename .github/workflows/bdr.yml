@@ -2,15 +2,25 @@ name: Pacific Yew BDR Agent
 
 on:
   schedule:
-    - cron: '0 15 * * *'   # 8am PDT. Re-enabled 2026-07-18 after Sheet dedup + doubling guard added.
+    # Three weekday windows spread outreach through the Lower Mainland workday.
+    # GitHub cron is UTC; these correspond to 8am, 11am, and 2pm PDT.
+    - cron: '0 15 * * 1-5'
+    - cron: '0 18 * * 1-5'
+    - cron: '0 21 * * 1-5'
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# Never allow two scheduled runs to overlap and reserve the same approval queue.
+concurrency:
+  group: pacific-yew-bdr-production
+  cancel-in-progress: false
+
 jobs:
   run-bdr:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -32,9 +42,9 @@ jobs:
       - name: Run BDR Agent
         env:
           APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+          APIFY_ACTOR: ${{ secrets.APIFY_ACTOR }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          # OPENROUTER_MODEL intentionally omitted — code defaults to "openrouter/free"
-          # If you want to pin a model, add it to the .env file and re-upload ENV_FILE secret.
+          # OPENROUTER_MODEL intentionally omitted — code defaults to "openrouter/free".
           GOOGLE_SHEET_NAME: ${{ secrets.GOOGLE_SHEET_NAME }}
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
           GOOGLE_SHEET_TAB: ${{ secrets.GOOGLE_SHEET_TAB }}
@@ -47,6 +57,9 @@ jobs:
           SENDER_WEBSITE: ${{ secrets.SENDER_WEBSITE }}
           SENDER_PHONE: ${{ secrets.SENDER_PHONE }}
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          SEND_LIMIT: ${{ secrets.SEND_LIMIT }}
-          QUERIES_PER_RUN: ${{ secrets.QUERIES_PER_RUN }}
+          # Controlled production volume: 8 per window x 3 weekday windows = 24/day max.
+          # These workflow values intentionally override stale repository secrets.
+          SEND_LIMIT: '8'
+          QUERIES_PER_RUN: '24'
+          RESULTS_PER_QUERY: '10'
         run: python bdr_agent.py
