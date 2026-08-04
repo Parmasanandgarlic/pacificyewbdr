@@ -44,6 +44,7 @@ jobs:
       APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
       APIFY_ACTOR: ${{ secrets.APIFY_ACTOR }}
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      OPENROUTER_MODEL: 'nvidia/nemotron-3-ultra-550b-a55b:free'
       GMAIL_USER: ${{ secrets.GMAIL_USER }}
       GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
       SENDER_NAME: ${{ secrets.SENDER_NAME }}
