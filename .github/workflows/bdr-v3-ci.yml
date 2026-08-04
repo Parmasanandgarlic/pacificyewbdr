@@ -35,7 +35,9 @@ jobs:
         run: |
           set -euo pipefail
           cat \
-            .v3bundle.00 \
+            .v3bundle.000 \
+            .v3bundle.001 \
+            .v3bundle.002 \
             .v3bundle.003 \
             .v3bundle.004 \
             .v3bundle.005 \
