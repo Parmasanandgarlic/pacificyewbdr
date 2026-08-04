@@ -2,21 +2,21 @@ name: Pacific Yew BDR Agent
 
 on:
   schedule:
-    # DST-aware 3:00am Pacific run. Both UTC slots are scheduled; the runtime
-    # guard below permits only the one that is actually 03:00 in Vancouver.
-    - cron: '0 10 * * 1-5'
-    - cron: '0 11 * * 1-5'
-    # Existing daytime windows. GitHub cron is UTC; these are 8am, 11am,
-    # and 2pm while British Columbia is on daylight time.
-    - cron: '0 15 * * 1-5'
-    - cron: '0 18 * * 1-5'
-    - cron: '0 21 * * 1-5'
+    # Every local-time window has a PDT and PST UTC slot. The runtime guard
+    # allows only the occurrence matching the intended America/Vancouver time.
+    - cron: '0 10 * * 1-5' # 3am PDT candidate
+    - cron: '0 11 * * 1-5' # 3am PST candidate
+    - cron: '0 15 * * 1-5' # 8am PDT candidate
+    - cron: '0 16 * * 1-5' # 8am PST candidate
+    - cron: '0 18 * * 1-5' # 11am PDT candidate
+    - cron: '0 19 * * 1-5' # 11am PST candidate
+    - cron: '0 21 * * 1-5' # 2pm PDT candidate
+    - cron: '0 22 * * 1-5' # 2pm PST candidate
   workflow_dispatch:
 
 permissions:
   contents: read
 
-# Never allow two scheduled runs to overlap and reserve the same approval queue.
 concurrency:
   group: pacific-yew-bdr-production
   cancel-in-progress: false
@@ -37,10 +37,11 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Validate lead intelligence
+      - name: Validate production growth engine
         run: |
-          python -m py_compile bdr_agent.py bdr_runner.py lead_intelligence.py
+          python -m py_compile bdr_agent.py bdr_runner.py lead_intelligence.py growth_engine.py
           python -m unittest discover -s tests -p 'test_lead_intelligence.py' -v
+          python -m unittest discover -s tests -p 'test_growth_engine.py' -v
 
       - name: Write Google service-account JSON
         run: |
@@ -48,7 +49,7 @@ jobs:
           echo "${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON_B64 }}" | base64 -d > creds/service_account.json
           python -c "import json; json.load(open('creds/service_account.json')); print('service_account.json is valid JSON')"
 
-      - name: Run BDR Agent
+      - name: Run BDR growth engine
         env:
           APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
           APIFY_ACTOR: ${{ secrets.APIFY_ACTOR }}
@@ -66,21 +67,34 @@ jobs:
           SENDER_WEBSITE: ${{ secrets.SENDER_WEBSITE }}
           SENDER_PHONE: ${{ secrets.SENDER_PHONE }}
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          # Controlled production volume: 8 per window x 4 weekday windows = 32/day max.
           SEND_LIMIT: '8'
           QUERIES_PER_RUN: '24'
           RESULTS_PER_QUERY: '10'
+          DISCOVERY_BUDGET_SECONDS: '3000'
+          QUALIFIED_BUFFER_MULTIPLIER: '2'
         shell: bash
         run: |
           set -euo pipefail
           event_name='${{ github.event_name }}'
           event_schedule='${{ github.event.schedule }}'
-          if [[ "$event_name" == "schedule" && \
-                ( "$event_schedule" == "0 10 * * 1-5" || "$event_schedule" == "0 11 * * 1-5" ) ]]; then
+          expected_time=''
+          run_slot='manual'
+
+          case "$event_schedule" in
+            '0 10 * * 1-5'|'0 11 * * 1-5') expected_time='03:00'; run_slot='overnight' ;;
+            '0 15 * * 1-5'|'0 16 * * 1-5') expected_time='08:00'; run_slot='morning' ;;
+            '0 18 * * 1-5'|'0 19 * * 1-5') expected_time='11:00'; run_slot='midday' ;;
+            '0 21 * * 1-5'|'0 22 * * 1-5') expected_time='14:00'; run_slot='afternoon' ;;
+          esac
+
+          if [[ "$event_name" == 'schedule' ]]; then
             local_time="$(TZ=America/Vancouver date +%H:%M)"
-            if [[ "$local_time" != "03:00" ]]; then
-              echo "Skipping duplicate DST slot; Vancouver local time is $local_time."
+            if [[ "$local_time" != "$expected_time" ]]; then
+              echo "Skipping duplicate DST slot; Vancouver local time is $local_time, expected $expected_time."
               exit 0
             fi
           fi
-          python bdr_runner.py
+
+          export BDR_RUN_SLOT="$run_slot"
+          echo "Starting Pacific Yew BDR slot=$BDR_RUN_SLOT"
+          python growth_engine.py
