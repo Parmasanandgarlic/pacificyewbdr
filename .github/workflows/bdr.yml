@@ -40,7 +40,8 @@ jobs:
       - name: Validate production growth engine
         run: |
           python -m py_compile bdr_agent.py bdr_runner.py lead_intelligence.py growth_engine.py
-          python -m unittest tests.test_lead_intelligence tests.test_growth_engine -v
+          python -m unittest discover -s tests -p 'test_lead_intelligence.py' -v
+          python -m unittest discover -s tests -p 'test_growth_engine.py' -v
 
       - name: Write Google service-account JSON
         run: |
