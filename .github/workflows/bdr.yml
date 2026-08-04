@@ -1,6 +1,11 @@
 name: Pacific Yew BDR Agent
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/bdr.yml'
   schedule:
     # Three weekday windows spread outreach through the Lower Mainland workday.
     # GitHub cron is UTC; these correspond to 8am, 11am, and 2pm PDT.
