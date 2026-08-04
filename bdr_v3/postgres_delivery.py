@@ -36,29 +36,14 @@ class PostgresDeliveryMixin:
             if row is None:
                 raise KeyError(f"touch not found: {touch_id}")
             claimed = ClaimedTouch(
-                touch_id=row[0],
-                enrollment_id=row[1],
-                campaign_id=row[2],
-                account_id=row[3],
-                contact_id=row[4],
-                mailbox_id=row[5],
-                sequence_step_id=row[6],
-                step_position=row[7],
-                subject=row[8],
-                body=row[9],
-                requires_approval=row[10],
-                approved_at=row[11],
+                touch_id=row[0], enrollment_id=row[1], campaign_id=row[2], account_id=row[3],
+                contact_id=row[4], mailbox_id=row[5], sequence_step_id=row[6], step_position=row[7],
+                subject=row[8], body=row[9], requires_approval=row[10], approved_at=row[11],
                 idempotency_key=row[12],
             )
             scorecard = Scorecard(
-                fit=row[20],
-                timing=row[21],
-                authority=row[22],
-                evidence=row[23],
-                risk=row[24],
-                total=row[25],
-                eligible=row[26],
-                reasons=tuple(row[27] or []),
+                fit=row[20], timing=row[21], authority=row[22], evidence=row[23], risk=row[24],
+                total=row[25], eligible=row[26], reasons=tuple(row[27] or []),
             )
             return DispatchContext(
                 touch=claimed,
@@ -74,7 +59,8 @@ class PostgresDeliveryMixin:
                 mailbox_enabled=row[29],
                 mailbox_daily_limit=row[30],
                 mailbox_sent_today=row[31],
-                conflicting_active_enrollment=row[32],
+                campaign_active=row[32],
+                conflicting_active_enrollment=row[33],
             )
 
     def reserve_message(self, touch_id: UUID, idempotency_key: str) -> UUID | None:
@@ -86,26 +72,12 @@ class PostgresDeliveryMixin:
         with self._connection() as conn, conn.cursor() as cur:
             cur.execute(
                 "select complete_bdr_message(%s,%s,%s,%s::jsonb)",
-                (
-                    message_id,
-                    receipt.provider_message_id,
-                    receipt.accepted_at,
-                    self._json(dict(receipt.raw)),
-                ),
+                (message_id, receipt.provider_message_id, receipt.accepted_at, self._json(dict(receipt.raw))),
             )
 
-    def mark_failed(
-        self,
-        touch_id: UUID,
-        message_id: UUID | None,
-        reason: str,
-        uncertain: bool,
-    ) -> None:
+    def mark_failed(self, touch_id: UUID, message_id: UUID | None, reason: str, uncertain: bool) -> None:
         with self._connection() as conn, conn.cursor() as cur:
-            cur.execute(
-                "select fail_bdr_message(%s,%s,%s,%s)",
-                (touch_id, message_id, reason, uncertain),
-            )
+            cur.execute("select fail_bdr_message(%s,%s,%s,%s)", (touch_id, message_id, reason, uncertain))
 
     def release_touch(self, touch_id: UUID, reason: str) -> None:
         with self._connection() as conn, conn.cursor() as cur:
@@ -117,3 +89,4 @@ class PostgresDeliveryMixin:
                 """,
                 (reason[:2000], touch_id),
             )
+
