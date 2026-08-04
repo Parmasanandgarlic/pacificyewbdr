@@ -7,8 +7,12 @@ on:
     paths:
       - '.github/workflows/bdr.yml'
   schedule:
-    # Three weekday windows spread outreach through the Lower Mainland workday.
-    # GitHub cron is UTC; these correspond to 8am, 11am, and 2pm PDT.
+    # DST-aware 2:30am Pacific run. Both UTC slots are scheduled; the runtime
+    # guard below permits only the one that is actually 02:30 in Vancouver.
+    - cron: '30 9 * * 1-5'
+    - cron: '30 10 * * 1-5'
+    # Existing daytime windows. GitHub cron is UTC; these are 8am, 11am,
+    # and 2pm while British Columbia is on daylight time.
     - cron: '0 15 * * 1-5'
     - cron: '0 18 * * 1-5'
     - cron: '0 21 * * 1-5'
@@ -25,7 +29,7 @@ concurrency:
 jobs:
   run-bdr:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -37,6 +41,11 @@ jobs:
 
       - name: Install dependencies
         run: pip install -r requirements.txt
+
+      - name: Validate lead intelligence
+        run: |
+          python -m py_compile bdr_agent.py bdr_runner.py lead_intelligence.py
+          python -m unittest discover -s tests -p 'test_lead_intelligence.py' -v
 
       - name: Write Google service-account JSON
         run: |
@@ -62,9 +71,21 @@ jobs:
           SENDER_WEBSITE: ${{ secrets.SENDER_WEBSITE }}
           SENDER_PHONE: ${{ secrets.SENDER_PHONE }}
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          # Controlled production volume: 8 per window x 3 weekday windows = 24/day max.
-          # These workflow values intentionally override stale repository secrets.
+          # Controlled production volume: 8 per window x 4 weekday windows = 32/day max.
           SEND_LIMIT: '8'
           QUERIES_PER_RUN: '24'
           RESULTS_PER_QUERY: '10'
-        run: python bdr_agent.py
+        shell: bash
+        run: |
+          set -euo pipefail
+          event_name='${{ github.event_name }}'
+          event_schedule='${{ github.event.schedule }}'
+          if [[ "$event_name" == "schedule" && \
+                ( "$event_schedule" == "30 9 * * 1-5" || "$event_schedule" == "30 10 * * 1-5" ) ]]; then
+            local_time="$(TZ=America/Vancouver date +%H:%M)"
+            if [[ "$local_time" != "02:30" ]]; then
+              echo "Skipping duplicate DST slot; Vancouver local time is $local_time."
+              exit 0
+            fi
+          fi
+          python bdr_runner.py
