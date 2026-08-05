@@ -6,6 +6,7 @@ import bdr_agent as legacy
 import email_copy_intelligence
 import outreach_compliance
 import production_hardening as hardening
+import run_reliability
 import schedule_control
 import streaming_growth
 
@@ -20,8 +21,9 @@ def main() -> None:
         hardening.install()
         email_copy_intelligence.install()
         outreach_compliance.install()
+        run_reliability.install()
         requested = max(1, int(os.environ.get("SEND_LIMIT", str(legacy.SEND_LIMIT))))
-        effective = hardening.effective_send_limit(requested)
+        effective = run_reliability.pacific_effective_send_limit(requested)
         if effective <= 0:
             print("[delivery-health] Pacific-day mailbox cap reached; no send attempted.")
             succeeded = True
