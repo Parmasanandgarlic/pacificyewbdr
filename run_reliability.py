@@ -56,14 +56,27 @@ def strict_dnc_set() -> set[str]:
     return blocked
 
 
-def effective_recovery_window_minutes() -> int:
-    """Return the single recovery boundary shared by slot claim and delivery.
+def normalize_sender_identity() -> None:
+    """Treat empty Actions secrets like missing values, then validate identity."""
+    legacy.SENDER_NAME = (legacy.SENDER_NAME or "Pacific Yew Automations").strip()
+    legacy.SENDER_INDIVIDUAL = (legacy.SENDER_INDIVIDUAL or "Michael Goulden").strip()
+    legacy.SENDER_WEBSITE = (legacy.SENDER_WEBSITE or "https://pacificyew.pro").strip()
+    legacy.REPLY_TO_EMAIL = (legacy.REPLY_TO_EMAIL or legacy.GMAIL_USER or "contact@pacificyew.pro").strip()
 
-    The 125-minute default permits a heartbeat queued near the end of a slot's
-    recovery period to finish preflight without the compliance layer rejecting
-    a slot that Run Control already validly claimed. Invalid configuration
-    fails back to the conservative code default rather than widening further.
-    """
+    if not legacy.SENDER_NAME:
+        raise RuntimeError("sender business identity is missing")
+    if not legacy.SENDER_INDIVIDUAL:
+        raise RuntimeError("individual sender identity is missing")
+    if not legacy.SENDER_ADDRESS:
+        raise RuntimeError("physical sender address is missing")
+    if not (legacy.SENDER_PHONE or legacy.SENDER_WEBSITE):
+        raise RuntimeError("secondary sender contact method is missing")
+    if not legacy.REPLY_TO_EMAIL:
+        raise RuntimeError("reply and unsubscribe address is missing")
+
+
+def effective_recovery_window_minutes() -> int:
+    """Return the single recovery boundary shared by slot claim and delivery."""
     try:
         configured = int(os.environ.get("HEARTBEAT_RECOVERY_WINDOW_MINUTES", "125"))
     except (TypeError, ValueError):
@@ -113,6 +126,7 @@ def retrying_preflight() -> bool:
     assert _PRIOR_PREFLIGHT is not None
 
     def check() -> bool:
+        normalize_sender_identity()
         legacy._LEDGER_CACHE = None
         legacy._BLOCKED_CACHE = None
         if not _PRIOR_PREFLIGHT():
@@ -179,6 +193,7 @@ def install() -> None:
     global _INSTALLED, _PRIOR_PREFLIGHT, _PRIOR_APPEND
     if _INSTALLED:
         return
+    normalize_sender_identity()
     _PRIOR_PREFLIGHT = legacy.preflight_checks
     _PRIOR_APPEND = legacy._append_to_ledger
     compliance._delivery_window_ok = reliable_delivery_window_ok
