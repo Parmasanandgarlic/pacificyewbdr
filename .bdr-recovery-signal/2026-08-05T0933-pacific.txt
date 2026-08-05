@@ -1,1 +1,1 @@
-Second guarded recovery synchronization after `.github/workflows/bdr-live.yml` became active on the default branch. Claim only the oldest due Pacific slot through Run Control and preserve all delivery, evidence, suppression, one-touch, ledger, and volume gates.
+Third guarded recovery synchronization after the new live workflow remained on the default branch long enough to register. Claim only the oldest due Pacific slot through Run Control and preserve every delivery, evidence, suppression, one-touch, ledger, and volume gate.
