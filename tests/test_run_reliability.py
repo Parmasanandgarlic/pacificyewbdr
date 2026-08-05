@@ -79,6 +79,30 @@ class RunReliabilityTests(unittest.TestCase):
             )
         self.assertFalse(ok)
 
+    def test_empty_sender_secrets_use_required_identity_defaults(self):
+        with patch.object(run_reliability.legacy, "SENDER_NAME", ""), \
+             patch.object(run_reliability.legacy, "SENDER_INDIVIDUAL", ""), \
+             patch.object(run_reliability.legacy, "SENDER_ADDRESS", "123 Main Street"), \
+             patch.object(run_reliability.legacy, "SENDER_WEBSITE", ""), \
+             patch.object(run_reliability.legacy, "SENDER_PHONE", ""), \
+             patch.object(run_reliability.legacy, "REPLY_TO_EMAIL", ""), \
+             patch.object(run_reliability.legacy, "GMAIL_USER", "contact@pacificyew.pro"):
+            run_reliability.normalize_sender_identity()
+            self.assertEqual(run_reliability.legacy.SENDER_NAME, "Pacific Yew Automations")
+            self.assertEqual(run_reliability.legacy.SENDER_INDIVIDUAL, "Michael Goulden")
+            self.assertEqual(run_reliability.legacy.SENDER_WEBSITE, "https://pacificyew.pro")
+            self.assertEqual(run_reliability.legacy.REPLY_TO_EMAIL, "contact@pacificyew.pro")
+
+    def test_sender_identity_fails_closed_without_physical_address(self):
+        with patch.object(run_reliability.legacy, "SENDER_NAME", "Pacific Yew Automations"), \
+             patch.object(run_reliability.legacy, "SENDER_INDIVIDUAL", "Michael Goulden"), \
+             patch.object(run_reliability.legacy, "SENDER_ADDRESS", ""), \
+             patch.object(run_reliability.legacy, "SENDER_WEBSITE", "https://pacificyew.pro"), \
+             patch.object(run_reliability.legacy, "SENDER_PHONE", ""), \
+             patch.object(run_reliability.legacy, "REPLY_TO_EMAIL", "contact@pacificyew.pro"):
+            with self.assertRaisesRegex(RuntimeError, "physical sender address"):
+                run_reliability.normalize_sender_identity()
+
     def test_strict_append_requires_both_ledgers_to_persist(self):
         run_reliability._PRIOR_APPEND = lambda *_args, **_kwargs: None
         with patch.object(run_reliability, "strict_sent_ledger_emails", return_value={"office@clinic.ca"}), \
