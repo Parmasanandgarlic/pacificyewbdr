@@ -1,1 +1,1 @@
-Guarded recovery synchronization after actionlint validated `.github/workflows/bdr-live.yml`. Claim only the oldest due Pacific slot through Run Control and preserve every delivery, evidence, suppression, one-touch, ledger, and volume gate.
+Guarded recovery synchronization after scheduler and compliance recovery windows were aligned and validated. Claim only the oldest due Pacific slot through Run Control and preserve every delivery, evidence, suppression, one-touch, ledger, and volume gate.
