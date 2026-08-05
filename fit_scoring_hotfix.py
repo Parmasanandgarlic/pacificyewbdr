@@ -103,13 +103,13 @@ def approve_evidence_ready_drafts() -> int:
             "offer_route",
             "email_subject",
             "email_body",
-            "agent_analysis",
         }
         if not required.issubset(headers):
             print(f"[growth] approval gate missing columns: {sorted(required - set(headers))}")
             return 0
 
         index = {name: headers.index(name) for name in required}
+        analysis_index = headers.index("agent_analysis") if "agent_analysis" in headers else None
         updates: list[gspread.Cell] = []
 
         for row_number, row in enumerate(values[1:], start=2):
@@ -118,9 +118,13 @@ def approve_evidence_ready_drafts() -> int:
                 return (row[position] if len(row) > position else "").strip()
 
             status = value("status").upper()
+            analysis = (
+                (row[analysis_index] if analysis_index is not None and len(row) > analysis_index else "")
+                .strip()
+            )
             deterministic_review = (
                 status == "NEEDS_REVIEW"
-                and "Deterministic evidence score=" in value("agent_analysis")
+                and "Deterministic evidence score=" in analysis
             )
             if status != "DRAFT_READY" and not deterministic_review:
                 continue
