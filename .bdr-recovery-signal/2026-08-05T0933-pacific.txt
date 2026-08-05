@@ -1,0 +1,1 @@
+Guarded recovery signal for the oldest due Pacific BDR slot on 2026-08-05. The production workflow must still claim the slot through Run Control and preserve all delivery and compliance gates.
