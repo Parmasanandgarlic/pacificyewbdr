@@ -164,15 +164,11 @@ def claim_slot(slot: str, run_cap: int, now: datetime | None = None) -> dict[str
         row for row in records
         if row.get("local_date") == local_date and row.get("run_slot") == slot
     ]
-    if any((row.get("status") or "").upper() == "COMPLETED" for row in attempts):
-        return {
-            "should_run": "false",
-            "run_slot": slot,
-            "send_limit": "0",
-            "attempt_id": "",
-            "reason": "slot_already_completed",
-        }
 
+    # Attempt status describes that individual process, not whether the whole
+    # slot reached capacity. A successful zero-send or partial-send attempt must
+    # remain recoverable. The immutable Sent Ledger is the authority for how
+    # much of the slot was actually filled.
     current_ledger_count = _sent_ledger_count()
     prior_sent = prior_slot_sent_count(attempts, current_ledger_count)
     remaining = max(0, max(1, run_cap) - prior_sent)
