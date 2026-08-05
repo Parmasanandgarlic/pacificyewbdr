@@ -1,7 +1,13 @@
+import os
 import unittest
+from datetime import datetime
 from unittest.mock import Mock, patch
+from zoneinfo import ZoneInfo
 
 import run_reliability
+
+
+PACIFIC = ZoneInfo("America/Vancouver")
 
 
 class RunReliabilityTests(unittest.TestCase):
@@ -35,6 +41,29 @@ class RunReliabilityTests(unittest.TestCase):
     def test_retry_helper_fails_closed_after_all_attempts(self):
         with patch.object(run_reliability.time, "sleep"):
             self.assertFalse(run_reliability._attempt("test", lambda: False, attempts=3))
+
+    def test_recovery_delivery_window_accepts_last_scheduler_candidate(self):
+        with patch.dict(os.environ, {
+            "INITIAL_OUTREACH_ONLY": "true",
+            "ALLOW_MANUAL_DELIVERY": "false",
+        }, clear=False):
+            ok, reason = run_reliability.delivery_window_ok_at(
+                "morning",
+                datetime(2026, 8, 5, 9, 37, tzinfo=PACIFIC),
+            )
+        self.assertTrue(ok, reason)
+
+    def test_recovery_delivery_window_rejects_after_expiry(self):
+        with patch.dict(os.environ, {
+            "INITIAL_OUTREACH_ONLY": "true",
+            "ALLOW_MANUAL_DELIVERY": "false",
+        }, clear=False):
+            ok, reason = run_reliability.delivery_window_ok_at(
+                "morning",
+                datetime(2026, 8, 5, 9, 46, tzinfo=PACIFIC),
+            )
+        self.assertFalse(ok)
+        self.assertIn("outside approved", reason)
 
     def test_strict_append_requires_both_ledgers_to_persist(self):
         run_reliability._PRIOR_APPEND = lambda *_args, **_kwargs: None
