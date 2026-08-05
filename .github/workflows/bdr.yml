@@ -10,8 +10,6 @@ on:
   push:
     branches: [main]
     paths:
-      # Changing this production workflow creates one immediate, guarded
-      # heartbeat. This recovers the current due slot after scheduler repairs.
       - '.github/workflows/bdr.yml'
   issue_comment:
     types: [created]
@@ -19,6 +17,7 @@ on:
 
 permissions:
   contents: read
+  issues: write
 
 concurrency:
   group: pacific-yew-bdr-production
@@ -93,6 +92,25 @@ jobs:
 
           python auto_schedule.py --run-cap 8
 
+      - name: Report recovery heartbeat accepted
+        if: github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          RUN_SLOT: ${{ steps.slot.outputs.run_slot }}
+          SEND_LIMIT: ${{ steps.slot.outputs.send_limit }}
+          SHOULD_RUN: ${{ steps.slot.outputs.should_run }}
+          REASON: ${{ steps.slot.outputs.reason }}
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [[ "$SHOULD_RUN" == 'true' ]]; then
+            body="BDR recovery heartbeat accepted. Slot: ${RUN_SLOT}. Remaining slot capacity: ${SEND_LIMIT}. Live run: ${RUN_URL}"
+          else
+            body="BDR recovery heartbeat did not claim a send. Reason: ${REASON}. Live run: ${RUN_URL}"
+          fi
+          gh api "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}/comments" -f body="$body"
+
       - name: Run compliant streaming BDR worker
         if: steps.slot.outputs.should_run == 'true'
         env:
@@ -115,7 +133,6 @@ jobs:
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           BDR_RUN_SLOT: ${{ steps.slot.outputs.run_slot }}
           BDR_ATTEMPT_ID: ${{ steps.slot.outputs.attempt_id }}
-          # Volume is an operational/deliverability cap, not a statutory safe harbour.
           SEND_LIMIT: ${{ steps.slot.outputs.send_limit }}
           DAILY_SEND_CAP: '32'
           INITIAL_OUTREACH_ONLY: 'true'
@@ -137,4 +154,22 @@ jobs:
         if: steps.slot.outputs.should_run != 'true'
         run: |
           echo "No delivery was due for this heartbeat: ${{ steps.slot.outputs.reason }}"
-          echo "Expected reasons include completed slots, no current due slot, and manual validation."
+
+      - name: Report recovery heartbeat result
+        if: always() && github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          JOB_STATUS: ${{ job.status }}
+          RUN_SLOT: ${{ steps.slot.outputs.run_slot }}
+          SHOULD_RUN: ${{ steps.slot.outputs.should_run }}
+          REASON: ${{ steps.slot.outputs.reason }}
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [[ "$SHOULD_RUN" == 'true' ]]; then
+            body="BDR recovery heartbeat finished with job status ${JOB_STATUS}. Slot: ${RUN_SLOT}. Run details: ${RUN_URL}"
+          else
+            body="BDR recovery heartbeat finished without delivery. Reason: ${REASON}. Job status: ${JOB_STATUS}. Run details: ${RUN_URL}"
+          fi
+          gh api "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}/comments" -f body="$body"
