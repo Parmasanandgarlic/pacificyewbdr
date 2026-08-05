@@ -42,28 +42,42 @@ class RunReliabilityTests(unittest.TestCase):
         with patch.object(run_reliability.time, "sleep"):
             self.assertFalse(run_reliability._attempt("test", lambda: False, attempts=3))
 
-    def test_recovery_delivery_window_accepts_last_scheduler_candidate(self):
+    def test_recovery_delivery_window_accepts_delayed_heartbeat(self):
         with patch.dict(os.environ, {
             "INITIAL_OUTREACH_ONLY": "true",
             "ALLOW_MANUAL_DELIVERY": "false",
+            "HEARTBEAT_RECOVERY_WINDOW_MINUTES": "125",
         }, clear=False):
             ok, reason = run_reliability.delivery_window_ok_at(
                 "morning",
-                datetime(2026, 8, 5, 9, 37, tzinfo=PACIFIC),
+                datetime(2026, 8, 5, 9, 54, tzinfo=PACIFIC),
             )
         self.assertTrue(ok, reason)
 
-    def test_recovery_delivery_window_rejects_after_expiry(self):
+    def test_recovery_delivery_window_rejects_after_shared_expiry(self):
         with patch.dict(os.environ, {
             "INITIAL_OUTREACH_ONLY": "true",
             "ALLOW_MANUAL_DELIVERY": "false",
+            "HEARTBEAT_RECOVERY_WINDOW_MINUTES": "125",
         }, clear=False):
             ok, reason = run_reliability.delivery_window_ok_at(
                 "morning",
-                datetime(2026, 8, 5, 9, 46, tzinfo=PACIFIC),
+                datetime(2026, 8, 5, 10, 6, tzinfo=PACIFIC),
             )
         self.assertFalse(ok)
         self.assertIn("outside approved", reason)
+
+    def test_recovery_window_cannot_be_widened_above_code_cap(self):
+        with patch.dict(os.environ, {
+            "INITIAL_OUTREACH_ONLY": "true",
+            "ALLOW_MANUAL_DELIVERY": "false",
+            "HEARTBEAT_RECOVERY_WINDOW_MINUTES": "999",
+        }, clear=False):
+            ok, _reason = run_reliability.delivery_window_ok_at(
+                "morning",
+                datetime(2026, 8, 5, 10, 6, tzinfo=PACIFIC),
+            )
+        self.assertFalse(ok)
 
     def test_strict_append_requires_both_ledgers_to_persist(self):
         run_reliability._PRIOR_APPEND = lambda *_args, **_kwargs: None
