@@ -9,8 +9,9 @@ on:
   push:
     branches: [main]
     paths:
-      # A production-workflow repair creates one immediate guarded heartbeat.
       - '.github/workflows/bdr.yml'
+  pull_request:
+    types: [opened]
   workflow_dispatch:
 
 permissions:
@@ -23,11 +24,22 @@ concurrency:
 
 jobs:
   run-bdr:
+    if: >
+      github.event_name != 'pull_request' ||
+      (
+        github.event.action == 'opened' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        github.event.pull_request.head.ref == 'ops/bdr-recovery-signal' &&
+        github.event.pull_request.user.login == github.repository_owner &&
+        github.event.pull_request.title == 'BDR guarded recovery signal'
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - name: Checkout code
+      - name: Checkout trusted production code
         uses: actions/checkout@v4
+        with:
+          ref: main
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -73,6 +85,7 @@ jobs:
 
       - name: Report heartbeat decision
         if: always() && github.event_name != 'workflow_dispatch'
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           STATUS_ISSUE: '13'
@@ -136,6 +149,7 @@ jobs:
 
       - name: Report heartbeat result
         if: always() && github.event_name != 'workflow_dispatch'
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           STATUS_ISSUE: '13'
