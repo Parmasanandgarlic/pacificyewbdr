@@ -49,7 +49,7 @@ jobs:
 
       - name: Validate complete production worker
         run: |
-          python -m py_compile bdr_agent.py bdr_runner.py lead_intelligence.py growth_engine.py production_hardening.py streaming_growth.py email_copy_intelligence.py outreach_compliance.py run_reliability.py schedule_control.py auto_schedule.py production_streaming.py
+          python -m py_compile bdr_agent.py bdr_runner.py lead_intelligence.py growth_engine.py production_hardening.py streaming_growth.py discovery_reliability.py email_copy_intelligence.py outreach_compliance.py run_reliability.py schedule_control.py auto_schedule.py production_streaming.py
           python -m unittest discover -s tests -p 'test_*.py' -v
 
       - name: Write Google service-account JSON
@@ -95,6 +95,7 @@ jobs:
         env:
           APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
           APIFY_ACTOR: ${{ secrets.APIFY_ACTOR }}
+          APIFY_MAX_CALLS_PER_RUN: '12'
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           OPENROUTER_MODEL: 'nvidia/nemotron-3-ultra-550b-a55b:free'
           OPENROUTER_FALLBACK_MODEL: 'openrouter/free'
