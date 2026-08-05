@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 
 import bdr_agent as legacy
+import discovery_reliability
 import email_copy_intelligence
 import outreach_compliance
 import production_hardening as hardening
@@ -22,6 +23,7 @@ def main() -> None:
         email_copy_intelligence.install()
         outreach_compliance.install()
         run_reliability.install()
+        discovery_reliability.install()
         requested = max(1, int(os.environ.get("SEND_LIMIT", str(legacy.SEND_LIMIT))))
         effective = run_reliability.pacific_effective_send_limit(requested)
         if effective <= 0:
