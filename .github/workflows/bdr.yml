@@ -2,16 +2,14 @@ name: Pacific Yew BDR Agent
 
 on:
   schedule:
-    # Four weekday Pacific-time delivery windows. Each has a PDT and PST
-    # candidate; the runtime guard permits only the matching local occurrence.
-    - cron: '0 15 * * 1-5' # 8am PDT candidate
-    - cron: '0 16 * * 1-5' # 8am PST candidate
-    - cron: '0 17 * * 1-5' # 10am PDT candidate
-    - cron: '0 18 * * 1-5' # 10am PST candidate
-    - cron: '0 19 * * 1-5' # 12pm PDT candidate
-    - cron: '0 20 * * 1-5' # 12pm PST candidate
-    - cron: '0 21 * * 1-5' # 2pm PDT candidate
-    - cron: '0 22 * * 1-5' # 2pm PST candidate
+    # Each Pacific delivery slot gets primary and recovery candidates for both
+    # PDT and PST. Run Control permits the due slot once and reconciles partial
+    # failed attempts before allowing only the remaining per-slot capacity.
+    # Minute 7/37 avoids GitHub's busiest top-of-hour scheduling boundary.
+    - cron: '7,37 15,16 * * 1-5' # 8am Pacific primary/recovery candidates
+    - cron: '7,37 17,18 * * 1-5' # 10am Pacific primary/recovery candidates
+    - cron: '7,37 19,20 * * 1-5' # 12pm Pacific primary/recovery candidates
+    - cron: '7,37 21,22 * * 1-5' # 2pm Pacific primary/recovery candidates
   workflow_dispatch:
 
 permissions:
@@ -40,16 +38,50 @@ jobs:
 
       - name: Validate complete production worker
         run: |
-          python -m py_compile bdr_agent.py bdr_runner.py lead_intelligence.py growth_engine.py production_hardening.py streaming_growth.py email_copy_intelligence.py outreach_compliance.py production_streaming.py
+          python -m py_compile bdr_agent.py bdr_runner.py lead_intelligence.py growth_engine.py production_hardening.py streaming_growth.py email_copy_intelligence.py outreach_compliance.py run_reliability.py schedule_control.py production_streaming.py
           python -m unittest discover -s tests -p 'test_*.py' -v
 
       - name: Write Google service-account JSON
         run: |
+          set -euo pipefail
+          test -n "${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON_B64 }}"
           mkdir -p creds
           echo "${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON_B64 }}" | base64 -d > creds/service_account.json
           python -c "import json; json.load(open('creds/service_account.json')); print('service_account.json is valid JSON')"
 
+      - name: Resolve and claim due Pacific slot
+        id: slot
+        env:
+          GOOGLE_SHEET_NAME: ${{ secrets.GOOGLE_SHEET_NAME }}
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+          GOOGLE_SHEET_TAB: ${{ secrets.GOOGLE_SHEET_TAB }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          event_name='${{ github.event_name }}'
+          event_schedule='${{ github.event.schedule }}'
+          target_slot=''
+
+          case "$event_schedule" in
+            '7,37 15,16 * * 1-5') target_slot='morning' ;;
+            '7,37 17,18 * * 1-5') target_slot='late_morning' ;;
+            '7,37 19,20 * * 1-5') target_slot='midday' ;;
+            '7,37 21,22 * * 1-5') target_slot='afternoon' ;;
+          esac
+
+          if [[ "$event_name" != 'schedule' || -z "$target_slot" ]]; then
+            echo 'should_run=false' >> "$GITHUB_OUTPUT"
+            echo 'run_slot=manual' >> "$GITHUB_OUTPUT"
+            echo 'send_limit=0' >> "$GITHUB_OUTPUT"
+            echo 'attempt_id=' >> "$GITHUB_OUTPUT"
+            echo 'reason=manual_delivery_disabled' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          python schedule_control.py claim --slot "$target_slot" --run-cap 8
+
       - name: Run compliant streaming BDR worker
+        if: steps.slot.outputs.should_run == 'true'
         env:
           APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
           APIFY_ACTOR: ${{ secrets.APIFY_ACTOR }}
@@ -68,12 +100,15 @@ jobs:
           SENDER_WEBSITE: ${{ secrets.SENDER_WEBSITE }}
           SENDER_PHONE: ${{ secrets.SENDER_PHONE }}
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          BDR_RUN_SLOT: ${{ steps.slot.outputs.run_slot }}
+          BDR_ATTEMPT_ID: ${{ steps.slot.outputs.attempt_id }}
           # Volume is an operational/deliverability cap, not a statutory safe harbour.
-          SEND_LIMIT: '8'
+          SEND_LIMIT: ${{ steps.slot.outputs.send_limit }}
           DAILY_SEND_CAP: '32'
           INITIAL_OUTREACH_ONLY: 'true'
           ALLOW_MANUAL_DELIVERY: 'false'
           ONE_TOUCH_LEDGER_TAB: 'One Touch Ledger'
+          RUN_CONTROL_TAB: 'Run Control'
           SEND_MIN_INTERVAL_SECONDS: '18'
           SEND_JITTER_SECONDS: '12'
           QUERIES_PER_RUN: '24'
@@ -83,29 +118,10 @@ jobs:
           STREAM_BATCH_QUALIFIED: '2'
           STREAM_BATCH_SIZE: '8'
           STREAM_MAX_FLUSH_SECONDS: '240'
-        shell: bash
+        run: python production_streaming.py
+
+      - name: Record no-op scheduler candidate
+        if: steps.slot.outputs.should_run != 'true'
         run: |
-          set -euo pipefail
-          event_name='${{ github.event_name }}'
-          event_schedule='${{ github.event.schedule }}'
-          expected_time=''
-          run_slot='manual'
-
-          case "$event_schedule" in
-            '0 15 * * 1-5'|'0 16 * * 1-5') expected_time='08:00'; run_slot='morning' ;;
-            '0 17 * * 1-5'|'0 18 * * 1-5') expected_time='10:00'; run_slot='late_morning' ;;
-            '0 19 * * 1-5'|'0 20 * * 1-5') expected_time='12:00'; run_slot='midday' ;;
-            '0 21 * * 1-5'|'0 22 * * 1-5') expected_time='14:00'; run_slot='afternoon' ;;
-          esac
-
-          if [[ "$event_name" == 'schedule' ]]; then
-            local_time="$(TZ=America/Vancouver date +%H:%M)"
-            if [[ "$local_time" != "$expected_time" ]]; then
-              echo "Skipping duplicate DST slot; Vancouver local time is $local_time, expected $expected_time."
-              exit 0
-            fi
-          fi
-
-          export BDR_RUN_SLOT="$run_slot"
-          echo "Starting Pacific Yew compliant BDR slot=$BDR_RUN_SLOT"
-          python production_streaming.py
+          echo "No delivery was due for this candidate: ${{ steps.slot.outputs.reason }}"
+          echo "This is expected for duplicate DST candidates, recovery candidates after a completed slot, and manual validation runs."
