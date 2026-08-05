@@ -13,6 +13,7 @@ on:
       - 'outreach_compliance.py'
       - 'run_reliability.py'
       - 'schedule_control.py'
+      - 'auto_schedule.py'
       - 'production_streaming.py'
       - 'tests/test_*.py'
       - '.github/workflows/bdr.yml'
@@ -37,6 +38,6 @@ jobs:
         run: python -m pip install --upgrade pip && pip install -r requirements.txt
       - name: Compile every production module
         run: |
-          python -m py_compile bdr_agent.py bdr_runner.py lead_intelligence.py growth_engine.py production_hardening.py streaming_growth.py email_copy_intelligence.py outreach_compliance.py run_reliability.py schedule_control.py production_streaming.py
+          python -m py_compile bdr_agent.py bdr_runner.py lead_intelligence.py growth_engine.py production_hardening.py streaming_growth.py email_copy_intelligence.py outreach_compliance.py run_reliability.py schedule_control.py auto_schedule.py production_streaming.py
       - name: Run all production unit tests
         run: python -m unittest discover -s tests -p 'test_*.py' -v
