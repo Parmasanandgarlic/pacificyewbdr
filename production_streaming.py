@@ -10,6 +10,7 @@ import outreach_compliance
 import production_hardening as hardening
 import run_reliability
 import schedule_control
+import sheets_quota_runtime
 import streaming_growth
 
 
@@ -25,6 +26,9 @@ def main() -> None:
         email_copy_intelligence.install()
         outreach_compliance.install()
         run_reliability.install()
+        # Install after the compliance and strict-ledger wrappers so worksheet
+        # handles and lead context are reused without weakening verification.
+        sheets_quota_runtime.install()
         discovery_reliability.install()
         requested = max(1, int(os.environ.get("SEND_LIMIT", str(legacy.SEND_LIMIT))))
         effective = run_reliability.pacific_effective_send_limit(requested)
