@@ -2,14 +2,17 @@ name: Pacific Yew BDR Agent
 
 on:
   schedule:
-    # Each Pacific delivery slot gets primary and recovery candidates for both
-    # PDT and PST. Run Control permits the due slot once and reconciles partial
-    # failed attempts before allowing only the remaining per-slot capacity.
-    # Minute 7/37 avoids GitHub's busiest top-of-hour scheduling boundary.
-    - cron: '7,37 15,16 * * 1-5' # 8am Pacific primary/recovery candidates
-    - cron: '7,37 17,18 * * 1-5' # 10am Pacific primary/recovery candidates
-    - cron: '7,37 19,20 * * 1-5' # 12pm Pacific primary/recovery candidates
-    - cron: '7,37 21,22 * * 1-5' # 2pm Pacific primary/recovery candidates
+    # A frequent heartbeat is deliberately used instead of four brittle exact
+    # cron events. Run Control selects the oldest unfinished Pacific slot that
+    # is still inside its recovery window and permits it exactly once.
+    # Both PDT and PST business hours are covered by the UTC range.
+    - cron: '13,43 15-22 * * 1-5'
+  push:
+    branches: [main]
+    paths:
+      # Changing the production workflow creates one immediate, guarded
+      # heartbeat. This recovers the current due slot after scheduler repairs.
+      - '.github/workflows/bdr.yml'
   workflow_dispatch:
 
 permissions:
@@ -38,7 +41,7 @@ jobs:
 
       - name: Validate complete production worker
         run: |
-          python -m py_compile bdr_agent.py bdr_runner.py lead_intelligence.py growth_engine.py production_hardening.py streaming_growth.py email_copy_intelligence.py outreach_compliance.py run_reliability.py schedule_control.py production_streaming.py
+          python -m py_compile bdr_agent.py bdr_runner.py lead_intelligence.py growth_engine.py production_hardening.py streaming_growth.py email_copy_intelligence.py outreach_compliance.py run_reliability.py schedule_control.py auto_schedule.py production_streaming.py
           python -m unittest discover -s tests -p 'test_*.py' -v
 
       - name: Write Google service-account JSON
@@ -55,21 +58,13 @@ jobs:
           GOOGLE_SHEET_NAME: ${{ secrets.GOOGLE_SHEET_NAME }}
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
           GOOGLE_SHEET_TAB: ${{ secrets.GOOGLE_SHEET_TAB }}
+          RUN_CONTROL_TAB: 'Run Control'
         shell: bash
         run: |
           set -euo pipefail
           event_name='${{ github.event_name }}'
-          event_schedule='${{ github.event.schedule }}'
-          target_slot=''
 
-          case "$event_schedule" in
-            '7,37 15,16 * * 1-5') target_slot='morning' ;;
-            '7,37 17,18 * * 1-5') target_slot='late_morning' ;;
-            '7,37 19,20 * * 1-5') target_slot='midday' ;;
-            '7,37 21,22 * * 1-5') target_slot='afternoon' ;;
-          esac
-
-          if [[ "$event_name" != 'schedule' || -z "$target_slot" ]]; then
+          if [[ "$event_name" == 'workflow_dispatch' ]]; then
             echo 'should_run=false' >> "$GITHUB_OUTPUT"
             echo 'run_slot=manual' >> "$GITHUB_OUTPUT"
             echo 'send_limit=0' >> "$GITHUB_OUTPUT"
@@ -78,7 +73,16 @@ jobs:
             exit 0
           fi
 
-          python schedule_control.py claim --slot "$target_slot" --run-cap 8
+          if [[ "$event_name" != 'schedule' && "$event_name" != 'push' ]]; then
+            echo 'should_run=false' >> "$GITHUB_OUTPUT"
+            echo 'run_slot=none' >> "$GITHUB_OUTPUT"
+            echo 'send_limit=0' >> "$GITHUB_OUTPUT"
+            echo 'attempt_id=' >> "$GITHUB_OUTPUT"
+            echo 'reason=unsupported_event' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          python auto_schedule.py --run-cap 8
 
       - name: Run compliant streaming BDR worker
         if: steps.slot.outputs.should_run == 'true'
@@ -120,8 +124,8 @@ jobs:
           STREAM_MAX_FLUSH_SECONDS: '240'
         run: python production_streaming.py
 
-      - name: Record no-op scheduler candidate
+      - name: Record no-op scheduler heartbeat
         if: steps.slot.outputs.should_run != 'true'
         run: |
-          echo "No delivery was due for this candidate: ${{ steps.slot.outputs.reason }}"
-          echo "This is expected for duplicate DST candidates, recovery candidates after a completed slot, and manual validation runs."
+          echo "No delivery was due for this heartbeat: ${{ steps.slot.outputs.reason }}"
+          echo "Expected reasons include completed slots, no current due slot, and manual validation."
