@@ -5,12 +5,30 @@ on:
     # Frequent heartbeat. Run Control selects the oldest unfinished Pacific
     # slot still inside its recovery window and permits it exactly once.
     - cron: '13,43 15-22 * * 1-5'
+  workflow_dispatch:
   push:
     branches: [main]
+    # Any production-runtime hotfix should immediately ask Run Control to
+    # recover the still-due slot. Run Control remains the durable send gate.
     paths:
       - '.github/workflows/bdr-live.yml'
+      - 'requirements.txt'
+      - 'bdr_agent.py'
+      - 'bdr_runner.py'
+      - 'lead_intelligence.py'
+      - 'growth_engine.py'
+      - 'production_hardening.py'
+      - 'streaming_growth.py'
+      - 'discovery_reliability.py'
+      - 'email_copy_intelligence.py'
+      - 'fit_scoring_hotfix.py'
+      - 'outreach_compliance.py'
+      - 'run_reliability.py'
+      - 'schedule_control.py'
+      - 'auto_schedule.py'
+      - 'production_streaming.py'
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, closed]
 
 permissions:
   contents: read
@@ -27,7 +45,8 @@ concurrency:
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.head.ref == 'ops/bdr-recovery-signal' &&
       github.event.pull_request.user.login == github.repository_owner &&
-      github.event.pull_request.title == 'BDR guarded recovery signal'
+      github.event.pull_request.title == 'BDR guarded recovery signal' &&
+      (github.event.action != 'closed' || github.event.pull_request.merged == true)
     }}
 
 jobs:
@@ -38,7 +57,8 @@ jobs:
         github.event.pull_request.head.repo.full_name == github.repository &&
         github.event.pull_request.head.ref == 'ops/bdr-recovery-signal' &&
         github.event.pull_request.user.login == github.repository_owner &&
-        github.event.pull_request.title == 'BDR guarded recovery signal'
+        github.event.pull_request.title == 'BDR guarded recovery signal' &&
+        (github.event.action != 'closed' || github.event.pull_request.merged == true)
       )
     runs-on: ubuntu-latest
     timeout-minutes: 90
