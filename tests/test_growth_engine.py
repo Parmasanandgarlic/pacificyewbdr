@@ -2,6 +2,7 @@ import os
 import unittest
 from unittest.mock import Mock, patch
 
+import fit_scoring_hotfix as scoring
 import growth_engine as growth
 
 
@@ -73,6 +74,58 @@ class GrowthEngineTests(unittest.TestCase):
         self.assertEqual(metrics.no_public_business_email, 1)
         draft_mock.assert_not_called()
         insert_mock.assert_not_called()
+
+    def test_sixty_point_reviewed_draft_reaches_approved_queue(self):
+        headers = [
+            "email",
+            "status",
+            "source_url",
+            "consent_type",
+            "consent_observed_at",
+            "consent_evidence_hash",
+            "recipient_role",
+            "role_relevance",
+            "fit_score",
+            "primary_signal",
+            "research_evidence_url",
+            "offer_route",
+            "email_subject",
+            "email_body",
+        ]
+        row = [
+            "info@clinic.ca",
+            "DRAFT_READY",
+            "https://clinic.ca/contact",
+            "IMPLIED_CONSPICUOUS",
+            "2026-08-05T21:00:00+00:00",
+            "a" * 64,
+            "clinic operations",
+            "The inbox coordinates appointment and intake requests.",
+            "60",
+            "appointment intake",
+            "https://clinic.ca/appointments",
+            "booking_and_no_show",
+            "Appointment intake",
+            "Patients can request appointments online. A small intake handoff could organize those requests for staff review. That would reduce repeated administration without changing clinical decisions. Would it help to compare a simple workflow map?",
+        ]
+        worksheet = Mock()
+        worksheet.get_all_values.return_value = [headers, row]
+        previous_threshold = growth.intelligence.QUALIFICATION_THRESHOLD
+        try:
+            scoring.install()
+            with patch.object(growth.legacy, "get_sheet", return_value=worksheet), \
+                 patch.object(growth.legacy, "_sheets_throttle"), \
+                 patch.object(growth.legacy, "is_business_email", return_value=True), \
+                 patch.object(growth.legacy, "is_blocked", return_value=False), \
+                 patch.object(growth.legacy, "_in_sent_ledger", return_value=False), \
+                 patch.object(growth.intelligence, "validate_draft", return_value=(True, "ok")):
+                approved = growth.approve_growth_drafts()
+        finally:
+            growth.intelligence.QUALIFICATION_THRESHOLD = previous_threshold
+
+        self.assertEqual(approved, 1)
+        cells = worksheet.update_cells.call_args.args[0]
+        self.assertEqual(cells[0].value, "APPROVED")
 
     def test_main_sends_existing_queue_before_discovery(self):
         order = []
