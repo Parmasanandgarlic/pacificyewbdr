@@ -4,12 +4,12 @@ from dataclasses import replace
 from typing import Any
 
 import email_copy_intelligence as copy
+import lead_intelligence as intelligence
 
 
-# email_copy_intelligence has always treated an evidence-ranked opportunity
-# score of 60 as its sendable boundary. Keep one explicit constant here so the
-# production adapter cannot silently drift back to the unrelated legacy 65
-# account-score threshold.
+# The evidence-ranked opportunity engine defines 60 as its minimum supported
+# opportunity. Production must use that same boundary everywhere: strategy,
+# approval, queue, and delivery preparation.
 MIN_EVIDENCE_SCORE = 60
 _ORIGINAL_STRATEGY_FROM_PAYLOAD = copy._strategy_from_payload
 _INSTALLED = False
@@ -23,9 +23,8 @@ def deterministic_strategy_from_payload(
     """Use evidence-ranked opportunity scoring as the authoritative fit score.
 
     The model scores opportunity dimensions on a 0-5 scale. The opportunity
-    engine converts those dimensions to a bounded 0-100 score and originally
-    defines 60 as the minimum supported opportunity. The model's separate
-    top-level `fit_score` and `qualified` fields are advisory only.
+    engine converts those dimensions to a bounded 0-100 score. The model's
+    separate top-level `fit_score` and `qualified` fields are advisory only.
 
     Exact-source, role, route, confidence, copy-quality, suppression, one-touch,
     ledger, delivery-window, and volume controls remain mandatory.
@@ -67,7 +66,11 @@ def deterministic_strategy_from_payload(
 
 
 def install() -> None:
+    """Install one qualification boundary across the complete worker."""
     global _INSTALLED
+    # growth_engine and streaming_growth import this shared module object, so
+    # this aligns every downstream approval check before any Sheet row is read.
+    intelligence.QUALIFICATION_THRESHOLD = MIN_EVIDENCE_SCORE
     if _INSTALLED:
         return
     copy._strategy_from_payload = deterministic_strategy_from_payload
