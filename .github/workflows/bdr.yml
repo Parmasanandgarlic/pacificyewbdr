@@ -68,8 +68,9 @@ jobs:
           SENDER_WEBSITE: ${{ secrets.SENDER_WEBSITE }}
           SENDER_PHONE: ${{ secrets.SENDER_PHONE }}
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          SEND_LIMIT: '5'
-          DAILY_SEND_CAP: '20'
+          # Volume is an operational/deliverability cap, not a statutory safe harbour.
+          SEND_LIMIT: '8'
+          DAILY_SEND_CAP: '32'
           INITIAL_OUTREACH_ONLY: 'true'
           ALLOW_MANUAL_DELIVERY: 'false'
           ONE_TOUCH_LEDGER_TAB: 'One Touch Ledger'
