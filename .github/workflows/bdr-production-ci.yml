@@ -17,6 +17,7 @@ on:
       - 'production_streaming.py'
       - 'tests/test_*.py'
       - '.github/workflows/bdr.yml'
+      - '.github/workflows/bdr-live.yml'
       - '.github/workflows/bdr-immediate-kickstart.yml'
       - '.github/workflows/bdr-production-ci.yml'
   workflow_dispatch:
