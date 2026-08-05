@@ -11,21 +11,65 @@ PACIFIC = ZoneInfo("America/Vancouver")
 
 
 class RunReliabilityTests(unittest.TestCase):
+    def setUp(self):
+        run_reliability._SENT_LEDGER_ROWS_CACHE = None
+        run_reliability._DNC_ROWS_CACHE = None
+        run_reliability.legacy._LEDGER_CACHE = None
+        run_reliability.legacy._BLOCKED_CACHE = None
+
     def test_strict_sent_ledger_rejects_missing_columns(self):
         worksheet = Mock()
         worksheet.get_all_values.return_value = [["email", "subject"]]
         with patch.object(run_reliability.legacy, "_ensure_ledger", return_value=worksheet), \
-             patch.object(run_reliability.legacy, "_sheets_throttle"):
+             patch.object(run_reliability.legacy, "_sheets_throttle"), \
+             patch.object(run_reliability.time, "sleep"):
             with self.assertRaisesRegex(RuntimeError, "missing columns"):
                 run_reliability.strict_sent_ledger_emails()
+
+    def test_strict_sent_ledger_reuses_validated_cache(self):
+        run_reliability.legacy._LEDGER_CACHE = {"office@clinic.ca"}
+        with patch.object(run_reliability.legacy, "_ensure_ledger") as ensure:
+            result = run_reliability.strict_sent_ledger_emails()
+        self.assertEqual(result, {"office@clinic.ca"})
+        ensure.assert_not_called()
 
     def test_strict_dnc_rejects_unreadable_sheet(self):
         worksheet = Mock()
         worksheet.get_all_values.return_value = []
         with patch.object(run_reliability.legacy, "get_dnc_worksheet", return_value=worksheet), \
-             patch.object(run_reliability.legacy, "_sheets_throttle"):
+             patch.object(run_reliability.legacy, "_sheets_throttle"), \
+             patch.object(run_reliability.time, "sleep"):
             with self.assertRaisesRegex(RuntimeError, "unreadable"):
                 run_reliability.strict_dnc_set()
+
+    def test_value_retry_spans_transient_quota_failures(self):
+        calls = []
+
+        def operation():
+            calls.append(1)
+            if len(calls) < 3:
+                raise RuntimeError("429 quota")
+            return ["ready"]
+
+        with patch.object(run_reliability.time, "sleep") as sleep:
+            result = run_reliability._read_with_retry("ledger", operation, attempts=5)
+        self.assertEqual(result, ["ready"])
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_daily_cap_populates_send_guard_cache_from_same_read(self):
+        rows = [
+            ["email", "sent_at"],
+            ["sent@clinic.ca", "2026-08-05T18:00:00+00:00"],
+        ]
+        with patch.object(run_reliability, "_sent_ledger_rows", return_value=rows), \
+             patch.object(run_reliability, "datetime") as clock, \
+             patch.dict(os.environ, {"DAILY_SEND_CAP": "32"}, clear=False):
+            clock.now.return_value = datetime(2026, 8, 5, 14, 0, tzinfo=PACIFIC)
+            clock.fromisoformat.side_effect = datetime.fromisoformat
+            effective = run_reliability.pacific_effective_send_limit(8)
+        self.assertEqual(effective, 8)
+        self.assertEqual(run_reliability.legacy._LEDGER_CACHE, {"sent@clinic.ca"})
 
     def test_retry_helper_recovers_after_transient_failures(self):
         calls = []

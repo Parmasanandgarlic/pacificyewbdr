@@ -4,7 +4,7 @@ import os
 import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from typing import Callable
+from typing import Callable, TypeVar
 
 import bdr_agent as legacy
 import outreach_compliance as compliance
@@ -14,18 +14,56 @@ PACIFIC = ZoneInfo("America/Vancouver")
 _INSTALLED = False
 _PRIOR_PREFLIGHT: Callable[[], bool] | None = None
 _PRIOR_APPEND: Callable[..., object] | None = None
+_SENT_LEDGER_ROWS_CACHE: list[list[str]] | None = None
+_DNC_ROWS_CACHE: list[list[str]] | None = None
+T = TypeVar("T")
 
 
-def strict_sent_ledger_emails() -> set[str]:
-    worksheet = legacy._ensure_ledger()
-    legacy._sheets_throttle()
-    rows = worksheet.get_all_values()
-    if not rows:
-        raise RuntimeError("Sent Ledger is unreadable")
+def _read_with_retry(label: str, operation: Callable[[], T], attempts: int = 5) -> T:
+    """Retry fail-closed read operations through a full Sheets quota window."""
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            value = operation()
+            if attempt > 1:
+                print(f"[reliability] {label} recovered on attempt {attempt}.")
+            return value
+        except Exception as exc:
+            last_error = exc
+            print(f"[reliability] {label} attempt {attempt}/{attempts} failed: {exc}")
+            if attempt < attempts:
+                # 4 + 8 + 16 + 24 seconds spans a complete one-minute quota
+                # reset without issuing rapid duplicate reads.
+                time.sleep(min(24, 2 ** (attempt + 1)))
+    raise RuntimeError(f"{label} failed after {attempts} attempts: {last_error}") from last_error
+
+
+def _sent_ledger_rows(*, force: bool = False) -> list[list[str]]:
+    global _SENT_LEDGER_ROWS_CACHE
+    if _SENT_LEDGER_ROWS_CACHE is not None and not force:
+        return _SENT_LEDGER_ROWS_CACHE
+
+    def read() -> list[list[str]]:
+        worksheet = legacy._ensure_ledger()
+        legacy._sheets_throttle()
+        rows = worksheet.get_all_values()
+        if not rows:
+            raise RuntimeError("Sent Ledger is unreadable")
+        headers = rows[0]
+        required = {"email", "sent_at"}
+        if not required.issubset(headers):
+            raise RuntimeError(f"Sent Ledger missing columns: {sorted(required - set(headers))}")
+        return rows
+
+    _SENT_LEDGER_ROWS_CACHE = _read_with_retry("Sent Ledger read", read)
+    return _SENT_LEDGER_ROWS_CACHE
+
+
+def strict_sent_ledger_emails(*, force: bool = False) -> set[str]:
+    if legacy._LEDGER_CACHE is not None and not force:
+        return set(legacy._LEDGER_CACHE)
+    rows = _sent_ledger_rows(force=force)
     headers = rows[0]
-    required = {"email", "sent_at"}
-    if not required.issubset(headers):
-        raise RuntimeError(f"Sent Ledger missing columns: {sorted(required - set(headers))}")
     email_index = headers.index("email")
     result = {
         row[email_index].strip().lower()
@@ -36,15 +74,30 @@ def strict_sent_ledger_emails() -> set[str]:
     return result
 
 
-def strict_dnc_set() -> set[str]:
-    worksheet = legacy.get_dnc_worksheet()
-    legacy._sheets_throttle()
-    rows = worksheet.get_all_values()
-    if not rows:
-        raise RuntimeError("Do Not Contact ledger is unreadable")
+def _dnc_rows(*, force: bool = False) -> list[list[str]]:
+    global _DNC_ROWS_CACHE
+    if _DNC_ROWS_CACHE is not None and not force:
+        return _DNC_ROWS_CACHE
+
+    def read() -> list[list[str]]:
+        worksheet = legacy.get_dnc_worksheet()
+        legacy._sheets_throttle()
+        rows = worksheet.get_all_values()
+        if not rows:
+            raise RuntimeError("Do Not Contact ledger is unreadable")
+        if "email" not in rows[0]:
+            raise RuntimeError("Do Not Contact ledger is missing email column")
+        return rows
+
+    _DNC_ROWS_CACHE = _read_with_retry("Do Not Contact ledger read", read)
+    return _DNC_ROWS_CACHE
+
+
+def strict_dnc_set(*, force: bool = False) -> set[str]:
+    if legacy._BLOCKED_CACHE is not None and not force:
+        return set(legacy._BLOCKED_CACHE)
+    rows = _dnc_rows(force=force)
     headers = rows[0]
-    if "email" not in headers:
-        raise RuntimeError("Do Not Contact ledger is missing email column")
     email_index = headers.index("email")
     blocked = set(legacy.DNC_EMAILS)
     blocked.update(
@@ -127,10 +180,10 @@ def retrying_preflight() -> bool:
 
     def check() -> bool:
         normalize_sender_identity()
-        legacy._LEDGER_CACHE = None
-        legacy._BLOCKED_CACHE = None
         if not _PRIOR_PREFLIGHT():
             return False
+        # Reuse the validated daily-cap ledger read rather than reopening the
+        # spreadsheet immediately before SMTP.
         strict_sent_ledger_emails()
         strict_dnc_set()
         if compliance._load_one_touch_keys(force=True) is None:
@@ -142,15 +195,8 @@ def retrying_preflight() -> bool:
 
 def pacific_effective_send_limit(requested: int) -> int:
     local_today = datetime.now(PACIFIC).date()
-    worksheet = legacy._ensure_ledger()
-    legacy._sheets_throttle()
-    rows = worksheet.get_all_values()
-    if not rows:
-        raise RuntimeError("Sent Ledger could not be read for the Pacific-day cap")
+    rows = _sent_ledger_rows()
     headers = rows[0]
-    required = {"email", "sent_at"}
-    if not required.issubset(headers):
-        raise RuntimeError(f"Sent Ledger missing columns: {sorted(required - set(headers))}")
     email_index = headers.index("email")
     sent_index = headers.index("sent_at")
     sent_today = 0
@@ -163,6 +209,13 @@ def pacific_effective_send_limit(requested: int) -> int:
                 sent_today += 1
         except Exception:
             continue
+    # Populate the address cache from the same validated read. send_approved()
+    # can now perform its immutable-ledger guard without another API request.
+    legacy._LEDGER_CACHE = {
+        row[email_index].strip().lower()
+        for row in rows[1:]
+        if len(row) > email_index and row[email_index].strip() and "@" in row[email_index]
+    }
     daily_cap = max(1, int(os.environ.get("DAILY_SEND_CAP", "32")))
     effective = min(max(0, requested), max(0, daily_cap - sent_today))
     print(
@@ -178,13 +231,22 @@ def strict_append_to_ledgers(
     subject: str,
     source: str = "bdr_agent",
 ):
+    global _SENT_LEDGER_ROWS_CACHE
     assert _PRIOR_APPEND is not None
     result = _PRIOR_APPEND(email_address, business_name, subject, source)
     legacy._LEDGER_CACHE = None
-    if email_address.strip().lower() not in strict_sent_ledger_emails():
+    _SENT_LEDGER_ROWS_CACHE = None
+    if email_address.strip().lower() not in strict_sent_ledger_emails(force=True):
         raise RuntimeError(f"Sent Ledger did not persist {email_address}")
-    keys = compliance._load_one_touch_keys(force=True)
-    if keys is None or email_address.strip().lower() not in keys["emails"]:
+
+    def one_touch_read():
+        keys = compliance._load_one_touch_keys(force=True)
+        if keys is None:
+            raise RuntimeError("One Touch Ledger is unreadable")
+        return keys
+
+    keys = _read_with_retry("One Touch Ledger verification", one_touch_read)
+    if email_address.strip().lower() not in keys["emails"]:
         raise RuntimeError(f"One Touch Ledger did not persist {email_address}")
     return result
 
