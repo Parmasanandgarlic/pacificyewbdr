@@ -8,6 +8,7 @@ from typing import Callable
 
 import bdr_agent as legacy
 import outreach_compliance as compliance
+import schedule_control
 
 PACIFIC = ZoneInfo("America/Vancouver")
 _INSTALLED = False
@@ -53,6 +54,29 @@ def strict_dnc_set() -> set[str]:
     )
     legacy._BLOCKED_CACHE = blocked
     return blocked
+
+
+def delivery_window_ok_at(slot: str, now: datetime) -> tuple[bool, str]:
+    if os.environ.get("INITIAL_OUTREACH_ONLY", "true").strip().lower() != "true":
+        return False, "INITIAL_OUTREACH_ONLY must remain true"
+    if slot == "manual" and os.environ.get("ALLOW_MANUAL_DELIVERY", "false").strip().lower() != "true":
+        return False, "manual delivery is disabled; only four scheduled runs may send"
+    expected_minutes = schedule_control.SLOT_MINUTES.get(slot)
+    if expected_minutes is None:
+        return False, f"unapproved delivery slot: {slot}"
+    local_now = now.astimezone(PACIFIC)
+    if local_now.weekday() >= 5:
+        return False, "scheduled cold outreach is limited to weekdays"
+    current_minutes = local_now.hour * 60 + local_now.minute
+    delay = current_minutes - expected_minutes
+    if delay < 0 or delay > schedule_control.RECOVERY_WINDOW_MINUTES:
+        return False, f"outside approved business-hour recovery window for slot {slot}"
+    return True, "ok"
+
+
+def reliable_delivery_window_ok() -> tuple[bool, str]:
+    slot = os.environ.get("BDR_RUN_SLOT", "manual").strip().lower()
+    return delivery_window_ok_at(slot, datetime.now(PACIFIC))
 
 
 def _attempt(label: str, operation: Callable[[], bool], attempts: int = 3) -> bool:
@@ -142,6 +166,7 @@ def install() -> None:
         return
     _PRIOR_PREFLIGHT = legacy.preflight_checks
     _PRIOR_APPEND = legacy._append_to_ledger
+    compliance._delivery_window_ok = reliable_delivery_window_ok
     legacy.preflight_checks = retrying_preflight
     legacy._load_ledger_emails = strict_sent_ledger_emails
     legacy._blocked_set = strict_dnc_set
