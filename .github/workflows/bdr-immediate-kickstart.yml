@@ -29,6 +29,6 @@ jobs:
 
       - name: Validate production worker without delivery
         run: |
-          python -m py_compile bdr_agent.py bdr_runner.py lead_intelligence.py growth_engine.py production_hardening.py streaming_growth.py email_copy_intelligence.py outreach_compliance.py production_streaming.py
+          python -m py_compile bdr_agent.py bdr_runner.py lead_intelligence.py growth_engine.py production_hardening.py streaming_growth.py email_copy_intelligence.py outreach_compliance.py run_reliability.py schedule_control.py production_streaming.py
           python -m unittest discover -s tests -p 'test_*.py' -v
           echo "Manual workflow is validation-only. Production delivery occurs only in the four scheduled weekday windows."
