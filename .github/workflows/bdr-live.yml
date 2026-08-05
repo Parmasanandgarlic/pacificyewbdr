@@ -18,7 +18,17 @@ permissions:
 
 concurrency:
   group: pacific-yew-bdr-production
-  cancel-in-progress: false
+  # Normal heartbeats never interrupt active delivery. Only the exact,
+  # owner-authored recovery PR may replace a stale worker after a production
+  # fix. Run Control reconciles any messages already recorded in Sent Ledger.
+  cancel-in-progress: >-
+    ${{
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'ops/bdr-recovery-signal' &&
+      github.event.pull_request.user.login == github.repository_owner &&
+      github.event.pull_request.title == 'BDR guarded recovery signal'
+    }}
 
 jobs:
   run-bdr:
@@ -49,7 +59,7 @@ jobs:
 
       - name: Validate complete production worker
         run: |
-          python -m py_compile bdr_agent.py bdr_runner.py lead_intelligence.py growth_engine.py production_hardening.py streaming_growth.py discovery_reliability.py email_copy_intelligence.py outreach_compliance.py run_reliability.py schedule_control.py auto_schedule.py production_streaming.py
+          python -m py_compile bdr_agent.py bdr_runner.py lead_intelligence.py growth_engine.py production_hardening.py streaming_growth.py discovery_reliability.py email_copy_intelligence.py fit_scoring_hotfix.py outreach_compliance.py run_reliability.py schedule_control.py auto_schedule.py production_streaming.py
           python -m unittest discover -s tests -p 'test_*.py' -v
 
       - name: Write Google service-account JSON
@@ -125,7 +135,7 @@ jobs:
           MAX_QUERIES_PER_RUN: '72'
           RESULTS_PER_QUERY: '10'
           DISCOVERY_BUDGET_SECONDS: '2700'
-          STREAM_BATCH_QUALIFIED: '2'
+          STREAM_BATCH_QUALIFIED: '1'
           STREAM_BATCH_SIZE: '8'
           STREAM_MAX_FLUSH_SECONDS: '240'
         run: python production_streaming.py
