@@ -34,40 +34,57 @@ def payload(*, fit_score, qualified, impact, confidence, time_to_value, relevanc
 
 
 class DeterministicFitScoringTests(unittest.TestCase):
-    def test_strong_evidence_qualifies_despite_incompatible_model_score(self):
+    def test_original_sixty_point_opportunity_boundary_qualifies(self):
         strategy = scoring.deterministic_strategy_from_payload(
             payload(
-                fit_score=4,
+                fit_score=3,
                 qualified=False,
-                impact=4,
-                confidence=5,
-                time_to_value=4,
-                relevance=5,
-                risk=1,
+                impact=3,
+                confidence=3,
+                time_to_value=3,
+                relevance=4,
+                risk=2,
             ),
             DOSSIER,
             "booking_and_no_show",
         )
+        self.assertEqual(strategy.fit_score, 60)
         self.assertTrue(strategy.qualified)
-        self.assertGreaterEqual(strategy.fit_score, 65)
-        self.assertIn("model advisory score=4", strategy.reason)
+        self.assertIn("minimum evidence score=60", strategy.reason)
 
-    def test_weak_evidence_cannot_qualify_even_with_high_model_score(self):
+    def test_score_below_sixty_remains_blocked(self):
         strategy = scoring.deterministic_strategy_from_payload(
             payload(
                 fit_score=99,
                 qualified=True,
-                impact=2,
-                confidence=2,
-                time_to_value=2,
-                relevance=2,
-                risk=4,
+                impact=3,
+                confidence=3,
+                time_to_value=3,
+                relevance=4,
+                risk=3,
             ),
             DOSSIER,
             "booking_and_no_show",
         )
+        self.assertEqual(strategy.fit_score, 57)
         self.assertFalse(strategy.qualified)
-        self.assertLess(strategy.fit_score, 65)
+
+    def test_low_confidence_cannot_qualify_even_with_high_score(self):
+        strategy = scoring.deterministic_strategy_from_payload(
+            payload(
+                fit_score=99,
+                qualified=True,
+                impact=5,
+                confidence=2,
+                time_to_value=5,
+                relevance=5,
+                risk=0,
+            ),
+            DOSSIER,
+            "booking_and_no_show",
+        )
+        self.assertGreaterEqual(strategy.fit_score, 60)
+        self.assertFalse(strategy.qualified)
 
     def test_offer_route_mismatch_still_fails_closed(self):
         strategy = scoring.deterministic_strategy_from_payload(
