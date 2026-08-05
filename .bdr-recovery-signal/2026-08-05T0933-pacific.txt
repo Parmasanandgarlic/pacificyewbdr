@@ -1,1 +1,1 @@
-Guarded recovery signal for the oldest due Pacific BDR slot on 2026-08-05. The production workflow must still claim the slot through Run Control and preserve all delivery and compliance gates.
+Guarded recovery signal synchronized after deployment of the fresh Pacific Yew BDR Live workflow on 2026-08-05. The production workflow must claim only the oldest due Pacific slot through Run Control and preserve all delivery, evidence, suppression, one-touch, and volume gates.
