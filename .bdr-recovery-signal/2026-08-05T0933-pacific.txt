@@ -1,0 +1,1 @@
+Owner-authorized guarded recovery after valid deterministic NEEDS_REVIEW rows became safely recoverable under every current evidence, role, copy-quality, suppression, one-touch, dual-ledger, delivery-window, per-slot, and daily-volume gate. Cancel the active stale worker, reconcile any Sent Ledger delta, process recovered approvals before discovery, and use trusted main only.
