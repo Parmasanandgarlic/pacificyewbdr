@@ -1,1 +1,1 @@
-Third guarded recovery synchronization after the new live workflow remained on the default branch long enough to register. Claim only the oldest due Pacific slot through Run Control and preserve every delivery, evidence, suppression, one-touch, ledger, and volume gate.
+Guarded recovery synchronization after actionlint validated `.github/workflows/bdr-live.yml`. Claim only the oldest due Pacific slot through Run Control and preserve every delivery, evidence, suppression, one-touch, ledger, and volume gate.
