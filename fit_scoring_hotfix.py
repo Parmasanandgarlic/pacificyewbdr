@@ -4,9 +4,13 @@ from dataclasses import replace
 from typing import Any
 
 import email_copy_intelligence as copy
-import lead_intelligence as intelligence
 
 
+# email_copy_intelligence has always treated an evidence-ranked opportunity
+# score of 60 as its sendable boundary. Keep one explicit constant here so the
+# production adapter cannot silently drift back to the unrelated legacy 65
+# account-score threshold.
+MIN_EVIDENCE_SCORE = 60
 _ORIGINAL_STRATEGY_FROM_PAYLOAD = copy._strategy_from_payload
 _INSTALLED = False
 
@@ -16,17 +20,15 @@ def deterministic_strategy_from_payload(
     dossier: str,
     expected_offer_route: str,
 ) -> copy.Strategy:
-    """Replace the model's incompatible top-level score with evidence scoring.
+    """Use evidence-ranked opportunity scoring as the authoritative fit score.
 
-    The strategy model scores opportunity dimensions on a 0-5 scale. The
-    production gate previously compared its unrelated top-level `fit_score`
-    directly to a 65/100 threshold, which made otherwise supported prospects
-    impossible to qualify. The existing opportunity formula already converts
-    the evidence dimensions to a bounded 0-100 score, so it is the authoritative
-    fit score.
+    The model scores opportunity dimensions on a 0-5 scale. The opportunity
+    engine converts those dimensions to a bounded 0-100 score and originally
+    defines 60 as the minimum supported opportunity. The model's separate
+    top-level `fit_score` and `qualified` fields are advisory only.
 
-    This does not bypass any source, role, route, confidence, copy-quality,
-    suppression, one-touch, or delivery control.
+    Exact-source, role, route, confidence, copy-quality, suppression, one-touch,
+    ledger, delivery-window, and volume controls remain mandatory.
     """
     strategy = _ORIGINAL_STRATEGY_FROM_PAYLOAD(
         payload,
@@ -42,7 +44,7 @@ def deterministic_strategy_from_payload(
         and returned_route == expected_offer_route
         and strategy.recipient_role
         and strategy.role_relevance
-        and fit_score >= intelligence.QUALIFICATION_THRESHOLD
+        and fit_score >= MIN_EVIDENCE_SCORE
         and opportunity.confidence >= 3
         and opportunity.recipient_relevance >= 3
     )
@@ -51,6 +53,7 @@ def deterministic_strategy_from_payload(
     model_flag = bool(payload.get("qualified"))
     reason = (
         f"{strategy.reason} Deterministic evidence score={fit_score}; "
+        f"minimum evidence score={MIN_EVIDENCE_SCORE}; "
         f"model advisory score={model_score}; "
         f"model advisory qualified={str(model_flag).lower()}."
     ).strip()
