@@ -56,6 +56,21 @@ def strict_dnc_set() -> set[str]:
     return blocked
 
 
+def effective_recovery_window_minutes() -> int:
+    """Return the single recovery boundary shared by slot claim and delivery.
+
+    The 125-minute default permits a heartbeat queued near the end of a slot's
+    recovery period to finish preflight without the compliance layer rejecting
+    a slot that Run Control already validly claimed. Invalid configuration
+    fails back to the conservative code default rather than widening further.
+    """
+    try:
+        configured = int(os.environ.get("HEARTBEAT_RECOVERY_WINDOW_MINUTES", "125"))
+    except (TypeError, ValueError):
+        configured = 125
+    return max(schedule_control.RECOVERY_WINDOW_MINUTES, min(configured, 125))
+
+
 def delivery_window_ok_at(slot: str, now: datetime) -> tuple[bool, str]:
     if os.environ.get("INITIAL_OUTREACH_ONLY", "true").strip().lower() != "true":
         return False, "INITIAL_OUTREACH_ONLY must remain true"
@@ -69,7 +84,7 @@ def delivery_window_ok_at(slot: str, now: datetime) -> tuple[bool, str]:
         return False, "scheduled cold outreach is limited to weekdays"
     current_minutes = local_now.hour * 60 + local_now.minute
     delay = current_minutes - expected_minutes
-    if delay < 0 or delay > schedule_control.RECOVERY_WINDOW_MINUTES:
+    if delay < 0 or delay > effective_recovery_window_minutes():
         return False, f"outside approved business-hour recovery window for slot {slot}"
     return True, "ok"
 
