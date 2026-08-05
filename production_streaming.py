@@ -5,6 +5,7 @@ import os
 import bdr_agent as legacy
 import discovery_reliability
 import email_copy_intelligence
+import fit_scoring_hotfix
 import outreach_compliance
 import production_hardening as hardening
 import run_reliability
@@ -20,6 +21,7 @@ def main() -> None:
 
     try:
         hardening.install()
+        fit_scoring_hotfix.install()
         email_copy_intelligence.install()
         outreach_compliance.install()
         run_reliability.install()
