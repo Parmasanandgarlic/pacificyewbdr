@@ -131,7 +131,8 @@ jobs:
 
       - name: Record no-op heartbeat
         if: steps.slot.outputs.should_run != 'true'
-        run: echo "No delivery due: ${{ steps.slot.outputs.reason }}"
+        run: |
+          echo "No delivery due: ${{ steps.slot.outputs.reason }}"
 
       - name: Report heartbeat result
         if: always()
