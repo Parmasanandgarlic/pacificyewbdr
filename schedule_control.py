@@ -35,6 +35,7 @@ SLOT_MINUTES = {
     "afternoon": 14 * 60,
 }
 RECOVERY_WINDOW_MINUTES = 105
+ACTIVE_WORKER_LEASE_SECONDS = 100 * 60
 T = TypeVar("T")
 
 
@@ -47,6 +48,55 @@ def _safe_int(value: object, default: int = 0) -> int:
         return int(str(value or "").strip())
     except (TypeError, ValueError):
         return default
+
+
+def _parse_utc(value: object) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _active_worker_attempt(
+    records: list[dict[str, str]],
+    local_date: str,
+    current_attempt_id: str,
+    now_utc: datetime | None = None,
+) -> dict[str, str] | None:
+    """Return a fresh unfinished worker lease owned by another attempt."""
+    current = (now_utc or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    lease_seconds = max(
+        60,
+        min(
+            _safe_int(
+                os.environ.get("ACTIVE_WORKER_LEASE_SECONDS"),
+                ACTIVE_WORKER_LEASE_SECONDS,
+            ),
+            2 * 60 * 60,
+        ),
+    )
+    for record in reversed(records):
+        if record.get("local_date") != local_date:
+            continue
+        if record.get("attempt_id") == current_attempt_id:
+            continue
+        if (record.get("status") or "").strip().upper() != "STARTED":
+            continue
+        if (record.get("finished_at") or "").strip():
+            continue
+        claimed_at = _parse_utc(record.get("claimed_at"))
+        if claimed_at is None:
+            continue
+        age = (current - claimed_at).total_seconds()
+        if 0 <= age <= lease_seconds:
+            return record
+    return None
 
 
 def _sheet_retry(
@@ -257,6 +307,16 @@ def claim_slot(slot: str, run_cap: int, now: datetime | None = None) -> dict[str
 
     worksheet = _ensure_control_sheet()
     _headers, records = _records(worksheet)
+    active_worker = _active_worker_attempt(records, local_date, attempt_id)
+    if active_worker is not None:
+        return {
+            "should_run": "false",
+            "run_slot": slot,
+            "send_limit": "0",
+            "attempt_id": "",
+            "reason": "active_worker_lease",
+        }
+
     attempts = [
         row for row in records
         if row.get("local_date") == local_date and row.get("run_slot") == slot
