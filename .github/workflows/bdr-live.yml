@@ -102,7 +102,7 @@ jobs:
           GOOGLE_SHEET_TAB: ${{ secrets.GOOGLE_SHEET_TAB }}
           RUN_CONTROL_TAB: 'Run Control'
           ALLOW_SAME_DAY_CATCHUP: 'true'
-          SAME_DAY_CATCHUP_CUTOFF_MINUTES: '1020'
+          SAME_DAY_CATCHUP_CUTOFF_MINUTES: '1080'
         run: python auto_schedule.py --run-cap 8
 
       - name: Report heartbeat decision
@@ -154,7 +154,10 @@ jobs:
           INITIAL_OUTREACH_ONLY: 'true'
           ALLOW_MANUAL_DELIVERY: 'false'
           ALLOW_SAME_DAY_CATCHUP: 'true'
-          SAME_DAY_CATCHUP_CUTOFF_MINUTES: '1020'
+          SAME_DAY_CATCHUP_CUTOFF_MINUTES: '1080'
+          DRAIN_ALL_ELAPSED_SLOTS: 'true'
+          MAX_DRAIN_ATTEMPTS: '8'
+          DRAIN_WORKER_BUDGET_SECONDS: '5100'
           ONE_TOUCH_LEDGER_TAB: 'One Touch Ledger'
           RUN_CONTROL_TAB: 'Run Control'
           SEND_MIN_INTERVAL_SECONDS: '18'
