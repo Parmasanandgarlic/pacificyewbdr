@@ -1,0 +1,141 @@
+name: Pacific Yew BDR Aug 6 Recovery
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/bdr-emergency-2026-08-06.yml'
+      - '.github/emergency-bdr-trigger.txt'
+
+permissions:
+  contents: read
+  issues: write
+
+# This isolated group is intentional. auto_schedule.py blocks every ordinary
+# workflow from claiming Aug 6 slots while this date-scoped recovery is active.
+concurrency:
+  group: pacific-yew-bdr-emergency-2026-08-06
+  cancel-in-progress: false
+
+jobs:
+  recover-all-elapsed-slots:
+    if: github.repository_owner == 'Parmasanandgarlic' && github.actor == 'Parmasanandgarlic'
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    steps:
+      - name: Checkout trusted production code
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && pip install -r requirements.txt
+
+      - name: Validate complete production worker
+        run: |
+          python -m py_compile bdr_agent.py bdr_runner.py lead_intelligence.py growth_engine.py production_hardening.py streaming_growth.py discovery_reliability.py email_copy_intelligence.py fit_scoring_hotfix.py outreach_compliance.py run_reliability.py same_day_catchup.py sheets_quota_runtime.py schedule_control.py auto_schedule.py production_streaming.py
+          python -m unittest discover -s tests -p 'test_*.py' -v
+
+      - name: Write Google service-account JSON
+        run: |
+          set -euo pipefail
+          test -n "${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON_B64 }}"
+          mkdir -p creds
+          echo "${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON_B64 }}" | base64 -d > creds/service_account.json
+          python -c "import json; json.load(open('creds/service_account.json')); print('service_account.json is valid JSON')"
+
+      - name: Claim oldest unfinished Aug 6 slot
+        id: slot
+        env:
+          GOOGLE_SHEET_NAME: ${{ secrets.GOOGLE_SHEET_NAME }}
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+          GOOGLE_SHEET_TAB: ${{ secrets.GOOGLE_SHEET_TAB }}
+          RUN_CONTROL_TAB: 'Run Control'
+          BDR_EMERGENCY_DRAIN: 'true'
+          BDR_EMERGENCY_RECOVERY_DATE: '2026-08-06'
+          ALLOW_SAME_DAY_CATCHUP: 'true'
+          SAME_DAY_CATCHUP_CUTOFF_MINUTES: '1080'
+        run: python auto_schedule.py --run-cap 8
+
+      - name: Report emergency claim
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_SLOT: ${{ steps.slot.outputs.run_slot }}
+          SEND_LIMIT: ${{ steps.slot.outputs.send_limit }}
+          SHOULD_RUN: ${{ steps.slot.outputs.should_run }}
+          REASON: ${{ steps.slot.outputs.reason }}
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [[ "$SHOULD_RUN" == 'true' ]]; then
+            body="Aug 6 isolated BDR recovery accepted. Starting slot: ${RUN_SLOT}. Remaining capacity: ${SEND_LIMIT}. This worker will drain all elapsed unfinished slots. Run: ${RUN_URL}"
+          else
+            body="Aug 6 isolated BDR recovery did not claim delivery. Reason: ${REASON}. Run: ${RUN_URL}"
+          fi
+          gh api "repos/${GITHUB_REPOSITORY}/issues/13/comments" -f body="$body"
+
+      - name: Drain all elapsed unfinished slots
+        if: steps.slot.outputs.should_run == 'true'
+        env:
+          APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+          APIFY_ACTOR: ${{ secrets.APIFY_ACTOR }}
+          APIFY_MAX_CALLS_PER_RUN: '12'
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_MODEL: 'nvidia/nemotron-3-ultra-550b-a55b:free'
+          OPENROUTER_FALLBACK_MODEL: 'openrouter/free'
+          GOOGLE_SHEET_NAME: ${{ secrets.GOOGLE_SHEET_NAME }}
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+          GOOGLE_SHEET_TAB: ${{ secrets.GOOGLE_SHEET_TAB }}
+          REPLY_TO_EMAIL: ${{ secrets.REPLY_TO_EMAIL }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          SENDER_NAME: ${{ secrets.SENDER_NAME }}
+          SENDER_INDIVIDUAL: ${{ secrets.SENDER_INDIVIDUAL }}
+          SENDER_ADDRESS: ${{ secrets.SENDER_ADDRESS }}
+          SENDER_WEBSITE: ${{ secrets.SENDER_WEBSITE }}
+          SENDER_PHONE: ${{ secrets.SENDER_PHONE }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          BDR_RUN_SLOT: ${{ steps.slot.outputs.run_slot }}
+          BDR_ATTEMPT_ID: ${{ steps.slot.outputs.attempt_id }}
+          SEND_LIMIT: ${{ steps.slot.outputs.send_limit }}
+          DAILY_SEND_CAP: '32'
+          INITIAL_OUTREACH_ONLY: 'true'
+          ALLOW_MANUAL_DELIVERY: 'false'
+          BDR_EMERGENCY_DRAIN: 'true'
+          BDR_EMERGENCY_RECOVERY_DATE: '2026-08-06'
+          ALLOW_SAME_DAY_CATCHUP: 'true'
+          SAME_DAY_CATCHUP_CUTOFF_MINUTES: '1080'
+          DRAIN_ALL_ELAPSED_SLOTS: 'true'
+          MAX_DRAIN_ATTEMPTS: '8'
+          DRAIN_WORKER_BUDGET_SECONDS: '5100'
+          ONE_TOUCH_LEDGER_TAB: 'One Touch Ledger'
+          RUN_CONTROL_TAB: 'Run Control'
+          SEND_MIN_INTERVAL_SECONDS: '18'
+          SEND_JITTER_SECONDS: '12'
+          QUERIES_PER_RUN: '24'
+          MAX_QUERIES_PER_RUN: '72'
+          RESULTS_PER_QUERY: '10'
+          DISCOVERY_BUDGET_SECONDS: '2700'
+          STREAM_BATCH_QUALIFIED: '1'
+          STREAM_BATCH_SIZE: '8'
+          STREAM_MAX_FLUSH_SECONDS: '240'
+        run: python production_streaming.py
+
+      - name: Report emergency result
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JOB_STATUS: ${{ job.status }}
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          body="Aug 6 isolated BDR recovery finished. Job status: ${JOB_STATUS}. Run: ${RUN_URL}"
+          gh api "repos/${GITHUB_REPOSITORY}/issues/13/comments" -f body="$body"
