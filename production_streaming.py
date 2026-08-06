@@ -26,8 +26,11 @@ def main() -> None:
         fit_scoring_hotfix.install()
         email_copy_intelligence.install()
         outreach_compliance.install()
-        same_day_catchup.install()
+        # Reliability installs its strict preflight and base delivery-window
+        # wrapper first. Same-day catch-up must install afterwards so the
+        # bounded recovery window remains the final active compliance gate.
         run_reliability.install()
+        same_day_catchup.install()
         # Install after the compliance and strict-ledger wrappers so worksheet
         # handles and lead context are reused without weakening verification.
         sheets_quota_runtime.install()
