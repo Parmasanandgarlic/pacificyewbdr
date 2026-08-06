@@ -15,11 +15,11 @@ def _bool_env(name: str, default: bool = False) -> bool:
 
 
 def _cutoff_minutes() -> int:
-    raw = os.environ.get("SAME_DAY_CATCHUP_CUTOFF_MINUTES", "1020")
+    raw = os.environ.get("SAME_DAY_CATCHUP_CUTOFF_MINUTES", "1080")
     try:
         return max(14 * 60, min(int(raw), 18 * 60))
     except (TypeError, ValueError):
-        return 17 * 60
+        return 18 * 60
 
 
 def claim_due_slot(run_cap: int, now: datetime | None = None) -> dict[str, str]:
