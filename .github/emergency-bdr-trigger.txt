@@ -1,0 +1,2 @@
+2026-08-06T15:30:00-07:00 owner-authorized full-day recovery trigger.
+Use isolated emergency workflow, trusted main, Run Control, 8 per slot, 32 per Pacific day.
