@@ -12,15 +12,18 @@ _ORIGINAL_DELIVERY_WINDOW = None
 
 
 def _enabled() -> bool:
-    return os.environ.get("ALLOW_SAME_DAY_CATCHUP", "false").strip().lower() == "true"
+    # Same-day recovery is a production safety mechanism, not manual delivery.
+    # It is bounded below by governed slot identity, weekday checks, Run Control,
+    # per-slot capacity, the mailbox daily cap, and the hard Pacific cutoff.
+    return os.environ.get("ALLOW_SAME_DAY_CATCHUP", "true").strip().lower() == "true"
 
 
 def _cutoff_minutes() -> int:
-    raw = os.environ.get("SAME_DAY_CATCHUP_CUTOFF_MINUTES", "1020")
+    raw = os.environ.get("SAME_DAY_CATCHUP_CUTOFF_MINUTES", "1080")
     try:
         return max(14 * 60, min(int(raw), 18 * 60))
     except (TypeError, ValueError):
-        return 17 * 60
+        return 18 * 60
 
 
 def same_day_delivery_window_ok(now: datetime | None = None) -> tuple[bool, str]:
@@ -65,7 +68,3 @@ def install() -> None:
     _ORIGINAL_DELIVERY_WINDOW = compliance._delivery_window_ok
     compliance._delivery_window_ok = same_day_delivery_window_ok
     _INSTALLED = True
-
-
-# Production recovery trigger: a fresh main-branch push is required so GitHub
-# evaluates the current workflow definition and catch-up environment variables.
