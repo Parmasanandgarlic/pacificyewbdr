@@ -1,2 +1,3 @@
-Second durable marker reserved for sequential same-day recovery after the first guarded run completes.
-This file itself does not send mail.
+Owner-authorized synchronize signal for full same-day slot drain.
+Trusted main head: a928217f300602126f7744c8ef63d5930ac047f1.
+Run Control must process elapsed unfinished slots sequentially without exceeding 8 per slot or 32 for the Pacific day.
