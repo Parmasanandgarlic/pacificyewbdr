@@ -4,8 +4,10 @@ import argparse
 import os
 import re
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
+from typing import Callable, TypeVar
 from zoneinfo import ZoneInfo
 
 import gspread
@@ -33,6 +35,7 @@ SLOT_MINUTES = {
     "afternoon": 14 * 60,
 }
 RECOVERY_WINDOW_MINUTES = 105
+T = TypeVar("T")
 
 
 def _utc_now() -> str:
@@ -44,6 +47,37 @@ def _safe_int(value: object, default: int = 0) -> int:
         return int(str(value or "").strip())
     except (TypeError, ValueError):
         return default
+
+
+def _sheet_retry(
+    label: str,
+    operation: Callable[[], T],
+    attempts: int = 5,
+) -> T:
+    """Retry idempotent Run Control and ledger operations through a quota window.
+
+    Google Sheets read quotas reset over a rolling minute. The 4, 8, 16 and
+    24-second waits span that interval without issuing rapid duplicate calls.
+    Callers must only use this helper for reads or idempotent writes.
+    """
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            value = operation()
+            if attempt > 1:
+                print(f"[schedule-control] {label} recovered on attempt {attempt}.")
+            return value
+        except Exception as exc:
+            last_error = exc
+            print(
+                f"[schedule-control] {label} attempt {attempt}/{attempts} "
+                f"failed: {exc}"
+            )
+            if attempt < attempts:
+                time.sleep(min(24, 2 ** (attempt + 1)))
+    raise RuntimeError(
+        f"{label} failed after {attempts} attempts: {last_error}"
+    ) from last_error
 
 
 def slot_is_due(slot: str, now: datetime | None = None) -> tuple[bool, str]:
@@ -77,37 +111,52 @@ def prior_slot_sent_count(attempts: list[dict[str, str]], current_ledger_count: 
 
 
 def _authorize_spreadsheet():
-    creds = legacy.Credentials.from_service_account_file(
-        legacy.SHEET_CREDS,
-        scopes=legacy.SHEET_SCOPES,
-    )
-    client = gspread.authorize(creds)
-    return client.open_by_key(legacy.SHEET_ID)
+    def authorize():
+        creds = legacy.Credentials.from_service_account_file(
+            legacy.SHEET_CREDS,
+            scopes=legacy.SHEET_SCOPES,
+        )
+        client = gspread.authorize(creds)
+        return client.open_by_key(legacy.SHEET_ID)
+
+    return _sheet_retry("spreadsheet authorization", authorize)
 
 
 def _ensure_control_sheet():
     spreadsheet = _authorize_spreadsheet()
-    try:
-        worksheet = spreadsheet.worksheet(CONTROL_TAB)
-    except gspread.WorksheetNotFound:
-        worksheet = spreadsheet.add_worksheet(
-            title=CONTROL_TAB,
-            rows=2000,
-            cols=len(CONTROL_HEADERS),
-        )
-        worksheet.append_row(CONTROL_HEADERS)
-    headers = worksheet.row_values(1)
+
+    def open_or_create():
+        try:
+            return spreadsheet.worksheet(CONTROL_TAB)
+        except gspread.WorksheetNotFound:
+            return spreadsheet.add_worksheet(
+                title=CONTROL_TAB,
+                rows=2000,
+                cols=len(CONTROL_HEADERS),
+            )
+
+    worksheet = _sheet_retry("Run Control worksheet lookup", open_or_create)
+    headers = _sheet_retry("Run Control header read", lambda: worksheet.row_values(1))
     if not headers:
-        worksheet.append_row(CONTROL_HEADERS)
+        _sheet_retry(
+            "Run Control header initialization",
+            lambda: worksheet.update("A1", [CONTROL_HEADERS]),
+        )
         headers = list(CONTROL_HEADERS)
     missing = [header for header in CONTROL_HEADERS if header not in headers]
     if missing:
-        worksheet.update("A1", [headers + missing])
+        _sheet_retry(
+            "Run Control header reconciliation",
+            lambda: worksheet.update("A1", [headers + missing]),
+        )
     return worksheet
 
 
 def _records(worksheet) -> tuple[list[str], list[dict[str, str]]]:
-    values = worksheet.get_all_values()
+    values = _sheet_retry(
+        "Run Control records read",
+        lambda: worksheet.get_all_values(),
+    )
     headers = values[0] if values else list(CONTROL_HEADERS)
     records: list[dict[str, str]] = []
     for row_number, row in enumerate(values[1:], start=2):
@@ -118,7 +167,10 @@ def _records(worksheet) -> tuple[list[str], list[dict[str, str]]]:
 
 
 def _sent_ledger_count() -> int:
-    rows = legacy._ensure_ledger().get_all_values()
+    def read() -> list[list[str]]:
+        return legacy._ensure_ledger().get_all_values()
+
+    rows = _sheet_retry("Sent Ledger count read", read)
     if not rows:
         raise RuntimeError("Sent Ledger is empty or unreadable")
     headers = rows[0]
@@ -133,6 +185,48 @@ def _sent_ledger_count() -> int:
         and row[email_index].strip()
         and row[sent_index].strip()
     )
+
+
+def _append_attempt_row(
+    worksheet,
+    row: list[str],
+    attempt_id: str,
+    known_records: list[dict[str, str]] | None = None,
+    attempts: int = 5,
+) -> None:
+    """Append a Run Control attempt once, even if Sheets returns ambiguously.
+
+    A timed-out append can have reached Sheets before the client sees an error.
+    Before every retry, refresh the ledger and reuse the existing attempt row.
+    The deterministic attempt ID makes this safe across process reruns too.
+    """
+    if any(record.get("attempt_id") == attempt_id for record in (known_records or [])):
+        return
+
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        if attempt > 1:
+            _headers, refreshed = _records(worksheet)
+            if any(record.get("attempt_id") == attempt_id for record in refreshed):
+                print(
+                    f"[schedule-control] recovered existing attempt after "
+                    f"ambiguous append: {attempt_id}"
+                )
+                return
+        try:
+            worksheet.append_row(row)
+            return
+        except Exception as exc:
+            last_error = exc
+            print(
+                f"[schedule-control] Run Control append attempt "
+                f"{attempt}/{attempts} failed: {exc}"
+            )
+            if attempt < attempts:
+                time.sleep(min(24, 2 ** (attempt + 1)))
+    raise RuntimeError(
+        f"Run Control append failed after {attempts} attempts: {last_error}"
+    ) from last_error
 
 
 def _write_outputs(values: dict[str, str]) -> None:
@@ -158,6 +252,9 @@ def claim_slot(slot: str, run_cap: int, now: datetime | None = None) -> dict[str
 
     local_now = (now or datetime.now(PACIFIC)).astimezone(PACIFIC)
     local_date = local_now.date().isoformat()
+    run_identifier = os.environ.get("GITHUB_RUN_ID") or uuid.uuid4().hex[:12]
+    attempt_id = f"{local_date}-{slot}-{run_identifier}"
+
     worksheet = _ensure_control_sheet()
     _headers, records = _records(worksheet)
     attempts = [
@@ -173,18 +270,24 @@ def claim_slot(slot: str, run_cap: int, now: datetime | None = None) -> dict[str
     prior_sent = prior_slot_sent_count(attempts, current_ledger_count)
     remaining = max(0, max(1, run_cap) - prior_sent)
     if remaining <= 0:
-        worksheet.append_row([
-            local_date,
-            slot,
-            f"reconciled-{uuid.uuid4().hex[:12]}",
-            "COMPLETED",
-            _utc_now(),
-            _utc_now(),
-            str(current_ledger_count),
-            "0",
-            "reconciled prior attempts at slot cap",
-            os.environ.get("GITHUB_RUN_ID", ""),
-        ])
+        reconciled_id = f"{local_date}-{slot}-cap-{max(1, run_cap)}"
+        _append_attempt_row(
+            worksheet,
+            [
+                local_date,
+                slot,
+                reconciled_id,
+                "COMPLETED",
+                _utc_now(),
+                _utc_now(),
+                str(current_ledger_count),
+                "0",
+                "reconciled prior attempts at slot cap",
+                os.environ.get("GITHUB_RUN_ID", ""),
+            ],
+            reconciled_id,
+            records,
+        )
         return {
             "should_run": "false",
             "run_slot": slot,
@@ -193,19 +296,36 @@ def claim_slot(slot: str, run_cap: int, now: datetime | None = None) -> dict[str
             "reason": "slot_cap_already_reached",
         }
 
-    attempt_id = f"{local_date}-{slot}-{os.environ.get('GITHUB_RUN_ID', uuid.uuid4().hex[:12])}"
-    worksheet.append_row([
-        local_date,
-        slot,
+    existing_attempt = next(
+        (row for row in attempts if row.get("attempt_id") == attempt_id),
+        None,
+    )
+    if existing_attempt is not None:
+        return {
+            "should_run": "true",
+            "run_slot": slot,
+            "send_limit": str(remaining),
+            "attempt_id": attempt_id,
+            "reason": "slot_claim_recovered",
+        }
+
+    _append_attempt_row(
+        worksheet,
+        [
+            local_date,
+            slot,
+            attempt_id,
+            "STARTED",
+            _utc_now(),
+            "",
+            str(current_ledger_count),
+            "",
+            "",
+            os.environ.get("GITHUB_RUN_ID", ""),
+        ],
         attempt_id,
-        "STARTED",
-        _utc_now(),
-        "",
-        str(current_ledger_count),
-        "",
-        "",
-        os.environ.get("GITHUB_RUN_ID", ""),
-    ])
+        records,
+    )
     return {
         "should_run": "true",
         "run_slot": slot,
@@ -237,7 +357,10 @@ def finish_slot(attempt_id: str, success: bool, error: str = "") -> int:
         gspread.Cell(row=row_number, col=headers.index(field) + 1, value=value)
         for field, value in updates.items()
     ]
-    worksheet.update_cells(cells)
+    _sheet_retry(
+        "Run Control finalization update",
+        lambda: worksheet.update_cells(cells),
+    )
     print(
         f"[schedule-control] finished attempt={attempt_id} "
         f"status={updates['status']} sent={sent_count}"
