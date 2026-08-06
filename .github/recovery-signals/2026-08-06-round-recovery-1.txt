@@ -1,2 +1,3 @@
 Owner-authorized recovery signal for the oldest unfinished 2026-08-06 Pacific BDR slot.
 Run Control, per-slot limits, the 32-message daily cap, one-touch suppression, and all compliance gates remain authoritative.
+Synchronize signal issued after live wrapper-order correction at main d419cd976ae41bfb1a40decbd63f4ff6089fadee.
