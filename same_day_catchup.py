@@ -65,3 +65,7 @@ def install() -> None:
     _ORIGINAL_DELIVERY_WINDOW = compliance._delivery_window_ok
     compliance._delivery_window_ok = same_day_delivery_window_ok
     _INSTALLED = True
+
+
+# Production recovery trigger: a fresh main-branch push is required so GitHub
+# evaluates the current workflow definition and catch-up environment variables.
