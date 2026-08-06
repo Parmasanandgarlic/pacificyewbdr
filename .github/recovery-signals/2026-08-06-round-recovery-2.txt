@@ -1,0 +1,2 @@
+Second durable marker reserved for sequential same-day recovery after the first guarded run completes.
+This file itself does not send mail.
