@@ -47,12 +47,12 @@ def same_day_delivery_window_ok(now: datetime | None = None) -> tuple[bool, str]
         return False, "scheduled cold outreach is limited to weekdays"
 
     current_minutes = local_now.hour * 60 + local_now.minute
-    if abs(current_minutes - expected_minutes) <= 75:
+    if current_minutes < expected_minutes:
+        return False, f"slot {slot} is not due yet"
+    if current_minutes - expected_minutes <= 75:
         return True, "ok"
     if not _enabled():
         return False, f"outside approved business-hour window for slot {slot}"
-    if current_minutes < expected_minutes:
-        return False, f"slot {slot} is not due yet"
     if current_minutes > _cutoff_minutes():
         return False, "same-day catch-up cutoff has passed"
     return True, "same-day catch-up"
