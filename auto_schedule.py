@@ -22,6 +22,24 @@ def _cutoff_minutes() -> int:
         return 18 * 60
 
 
+def emergency_recovery_is_exclusive(now: datetime | None = None) -> bool:
+    """Keep stale workflow reruns from racing today's isolated recovery worker.
+
+    The guard is deliberately date-scoped and expires automatically after the
+    Aug 6 incident. The isolated workflow must opt in explicitly. Normal
+    scheduling resumes without a code change on the next Pacific date.
+    """
+    current = (now or datetime.now(schedule_control.PACIFIC)).astimezone(
+        schedule_control.PACIFIC
+    )
+    incident_date = os.environ.get("BDR_EMERGENCY_RECOVERY_DATE", "2026-08-06")
+    return (
+        current.date().isoformat() == incident_date
+        and current.hour * 60 + current.minute <= _cutoff_minutes()
+        and not _bool_env("BDR_EMERGENCY_DRAIN", False)
+    )
+
+
 def claim_due_slot(run_cap: int, now: datetime | None = None) -> dict[str, str]:
     """Claim the oldest unfinished scheduled slot that may still run today.
 
@@ -92,6 +110,15 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--run-cap", type=int, default=8)
     args = parser.parse_args()
+    if emergency_recovery_is_exclusive():
+        schedule_control._write_outputs({
+            "should_run": "false",
+            "run_slot": "none",
+            "send_limit": "0",
+            "attempt_id": "",
+            "reason": "isolated_emergency_recovery_active",
+        })
+        return
     schedule_control._write_outputs(claim_due_slot(args.run_cap))
 
 
