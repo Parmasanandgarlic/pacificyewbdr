@@ -1,0 +1,3 @@
+Owner-authorized synchronize signal for full same-day slot drain.
+Trusted main head: 997e4c8cc9c82ea1954ee5e67241ac23c8f205fe.
+Run Control must process elapsed unfinished slots sequentially without exceeding 8 per slot or 32 for the Pacific day.
