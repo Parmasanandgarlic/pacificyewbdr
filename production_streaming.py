@@ -9,6 +9,7 @@ import fit_scoring_hotfix
 import outreach_compliance
 import production_hardening as hardening
 import run_reliability
+import same_day_catchup
 import schedule_control
 import sheets_quota_runtime
 import streaming_growth
@@ -25,6 +26,7 @@ def main() -> None:
         fit_scoring_hotfix.install()
         email_copy_intelligence.install()
         outreach_compliance.install()
+        same_day_catchup.install()
         run_reliability.install()
         # Install after the compliance and strict-ledger wrappers so worksheet
         # handles and lead context are reused without weakening verification.

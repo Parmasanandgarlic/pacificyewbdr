@@ -2,14 +2,16 @@ name: Pacific Yew BDR Live
 
 on:
   schedule:
-    # Frequent heartbeat. Run Control selects the oldest unfinished Pacific
-    # slot still inside its recovery window and permits it exactly once.
-    - cron: '13,43 15-22 * * 1-5'
+    # Two explicit heartbeat registrations avoid relying on one combined cron.
+    # Run Control claims the oldest unfinished Pacific slot and enforces caps.
+    - cron: '13 15-23 * * 1-5'
+    - cron: '43 15-23 * * 1-5'
   workflow_dispatch:
   push:
     branches: [main]
     # Any production-runtime hotfix should immediately ask Run Control to
-    # recover the still-due slot. Run Control remains the durable send gate.
+    # recover the oldest unfinished same-day slot. Run Control remains the
+    # durable send gate.
     paths:
       - '.github/workflows/bdr-live.yml'
       - 'requirements.txt'
@@ -24,6 +26,7 @@ on:
       - 'fit_scoring_hotfix.py'
       - 'outreach_compliance.py'
       - 'run_reliability.py'
+      - 'same_day_catchup.py'
       - 'sheets_quota_runtime.py'
       - 'schedule_control.py'
       - 'auto_schedule.py'
@@ -80,7 +83,7 @@ jobs:
 
       - name: Validate complete production worker
         run: |
-          python -m py_compile bdr_agent.py bdr_runner.py lead_intelligence.py growth_engine.py production_hardening.py streaming_growth.py discovery_reliability.py email_copy_intelligence.py fit_scoring_hotfix.py outreach_compliance.py run_reliability.py sheets_quota_runtime.py schedule_control.py auto_schedule.py production_streaming.py
+          python -m py_compile bdr_agent.py bdr_runner.py lead_intelligence.py growth_engine.py production_hardening.py streaming_growth.py discovery_reliability.py email_copy_intelligence.py fit_scoring_hotfix.py outreach_compliance.py run_reliability.py same_day_catchup.py sheets_quota_runtime.py schedule_control.py auto_schedule.py production_streaming.py
           python -m unittest discover -s tests -p 'test_*.py' -v
 
       - name: Write Google service-account JSON
@@ -98,6 +101,8 @@ jobs:
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
           GOOGLE_SHEET_TAB: ${{ secrets.GOOGLE_SHEET_TAB }}
           RUN_CONTROL_TAB: 'Run Control'
+          ALLOW_SAME_DAY_CATCHUP: 'true'
+          SAME_DAY_CATCHUP_CUTOFF_MINUTES: '1020'
         run: python auto_schedule.py --run-cap 8
 
       - name: Report heartbeat decision
@@ -148,6 +153,8 @@ jobs:
           DAILY_SEND_CAP: '32'
           INITIAL_OUTREACH_ONLY: 'true'
           ALLOW_MANUAL_DELIVERY: 'false'
+          ALLOW_SAME_DAY_CATCHUP: 'true'
+          SAME_DAY_CATCHUP_CUTOFF_MINUTES: '1020'
           ONE_TOUCH_LEDGER_TAB: 'One Touch Ledger'
           RUN_CONTROL_TAB: 'Run Control'
           SEND_MIN_INTERVAL_SECONDS: '18'
